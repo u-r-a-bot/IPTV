@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where ares-package *)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\PhantomGrogu\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\" -Filter \"*ares*\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('version','not found'\\)\\)\")",
+      "PowerShell(\\(Get-Content \"C:\\\\Users\\\\PhantomGrogu\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\@webos-tools\\\\cli\\\\node_modules\\\\rimraf\\\\package.json\" | ConvertFrom-Json\\).version)",
+      "WebSearch",
+      "Bash(ls -la \"d:\\\\SLOPPY APPS\\\\IPTV\\\\\" 2>&1 | head -50)",
+      "Read(//d/SLOPPY APPS/**)"
+    ]
+  }
+}

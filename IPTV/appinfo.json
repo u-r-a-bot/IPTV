@@ -1,0 +1,10 @@
+{
+  "id": "com.domain.iptv",
+  "version": "1.0.0",
+  "vendor": "My Company",
+  "type": "web",
+  "main": "index.html",
+  "title": "IPTV",
+  "icon": "new-icon.png",
+  "largeIcon": "new-icon.png"
+}

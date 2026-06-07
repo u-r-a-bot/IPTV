@@ -1,0 +1,132 @@
+<!--
+Copyright (c) 2024 LG Electronics Inc.
+SPDX-License-Identifier: Apache-2.0
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920">
+  <title>YouTube TV</title>
+  <link rel="stylesheet" href="browser.css">
+</head>
+<body>
+
+<!-- Discovery overlay (shown until backend is found) -->
+<div id="discovery-overlay">
+  <span id="disc-logo">&#9654; YouTube TV</span>
+  <div id="disc-spinner"></div>
+  <p id="disc-status">Searching for backend on local network…</p>
+  <p id="disc-sub"></p>
+  <div id="disc-manual" class="hidden">
+    <p id="disc-manual-label">Enter server IP manually:</p>
+    <div id="disc-manual-row">
+      <input id="disc-ip" type="text" placeholder="192.168.1.x" autocomplete="off" spellcheck="false">
+      <button id="disc-connect-btn">Connect</button>
+    </div>
+    <p id="disc-manual-err" class="hidden"></p>
+  </div>
+</div>
+
+<!-- Home screen -->
+<div id="home">
+  <div id="topbar">
+    <span id="logo">&#9654; YouTube TV</span>
+    <div id="search-wrap">
+      <input id="search-input" type="text" placeholder="Search videos…"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+      <button id="search-btn">Search</button>
+    </div>
+    <div id="backend-dot" title="Backend offline"></div>
+  </div>
+
+  <div id="tabs">
+    <button class="tab active" data-cat="trending">Trending</button>
+    <button class="tab" data-cat="music">Music</button>
+    <button class="tab" data-cat="gaming">Gaming</button>
+    <button class="tab" data-cat="news">News</button>
+    <button class="tab" data-cat="sports">Sports</button>
+    <button class="tab" data-cat="movies">Movies</button>
+  </div>
+
+  <div id="grid-area">
+    <div id="grid-label">Trending</div>
+    <div id="video-grid"></div>
+    <div id="spinner" class="hidden">
+      <div id="grid-spinner"></div>
+      <span>Loading…</span>
+    </div>
+    <div id="error-msg" class="hidden"></div>
+  </div>
+</div>
+
+<!-- Full-screen player overlay -->
+<div id="player-overlay" class="hidden">
+
+  <!-- Native video — no iframe -->
+  <video id="player-video" preload="auto"></video>
+
+  <!-- Loading / buffering -->
+  <div id="player-loading">
+    <div id="player-spinner"></div>
+    <p id="player-loading-title">Loading video…</p>
+  </div>
+
+  <!-- Error state -->
+  <div id="player-error" class="hidden">
+    <div id="player-error-icon">&#9888;</div>
+    <p id="player-error-msg">Could not load video.</p>
+    <button id="player-error-btn">&#8592; Back to Grid</button>
+  </div>
+
+  <!-- Controls overlay -->
+  <div id="controls">
+
+    <!-- Top bar: back + title -->
+    <div id="ctrl-top">
+      <button id="ctrl-back-btn">&#8592; Back</button>
+      <div id="ctrl-meta">
+        <div id="ctrl-title"></div>
+        <div id="ctrl-channel"></div>
+      </div>
+    </div>
+
+    <!-- Centre: big play/pause flash -->
+    <div id="ctrl-center">
+      <div id="ctrl-bigicon"></div>
+    </div>
+
+    <!-- Bottom bar: play | time | scrubber | vol -->
+    <div id="ctrl-bottom">
+      <button id="ctrl-playpause">&#9654;</button>
+      <span id="ctrl-cur">0:00</span>
+      <div id="ctrl-bar-wrap">
+        <div id="ctrl-bar-bg">
+          <div id="ctrl-bar-buf"></div>
+          <div id="ctrl-bar-fill"></div>
+          <div id="ctrl-bar-dot"></div>
+        </div>
+      </div>
+      <span id="ctrl-dur">--:--</span>
+      <div id="ctrl-vol-wrap">
+        <span id="ctrl-vol-lbl">VOL</span>
+        <div id="ctrl-vol-track"><div id="ctrl-vol-fill"></div></div>
+        <span id="ctrl-vol-pct">100%</span>
+      </div>
+    </div>
+
+    <!-- Key-hint strip -->
+    <div id="ctrl-hints">
+      OK&nbsp;Play/Pause &nbsp;|&nbsp; &#9668;&#9658;&nbsp;Seek 10s &nbsp;|&nbsp; &#9650;&#9660;&nbsp;Volume &nbsp;|&nbsp; Back&nbsp;Close
+    </div>
+
+  </div>
+
+  <!-- Seek / volume toast -->
+  <div id="action-toast" class="hidden"></div>
+
+</div>
+
+<script src="browser.js"></script>
+</body>
+</html>
