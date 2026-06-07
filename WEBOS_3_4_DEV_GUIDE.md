@@ -96,6 +96,52 @@ doSomething()
 
 ---
 
+### 2.0 ⚠️⚠️ `KeyboardEvent.key` is UNDEFINED (Chrome < 51) — THE most important one
+`e.key` (the string, e.g. `'ArrowRight'`, `'Enter'`, `'Backspace'`) was **not supported
+until Chrome 51**. On WebOS 3.4 (Chrome 38) **`e.key` is `undefined` for every key.**
+This silently breaks ALL `if (e.key === 'ArrowRight')`-style code — every check is
+always-false, so D-pad navigation, OK/Enter, and Back simply do nothing. (Pointer/Magic
+Remote still works because it fires `click`, not `keydown` — a classic misleading symptom:
+"mouse works but D-pad doesn't.")
+
+**Fix**: drive everything off `e.keyCode` (universal, including Chrome 38):
+| Key | keyCode |
+|---|---|
+| Backspace | 8 |
+| Enter / OK | 13 |
+| Escape | 27 |
+| Left / Up / Right / Down | 37 / 38 / 39 / 40 |
+
+```javascript
+function handleKey(e) {
+  var kc = e.keyCode;
+  var LEFT = kc===37, UP = kc===38, RIGHT = kc===39, DOWN = kc===40, OK = kc===13;
+  if (RIGHT) { /* ... */ }
+  // NEVER: if (e.key === 'ArrowRight')
+}
+```
+Note `e.keyCode` is "deprecated" in modern specs but it's the ONLY reliable option on
+WebOS 3.4. Do not use `e.key` or `e.code` for this target.
+
+### 2.4b `scrollIntoView({block:'nearest'})` — options object NOT supported (Chrome < 61)
+The **boolean** form `scrollIntoView(true/false)` works on Chrome 38, but the **options
+object** form is Chrome 61+. On WebOS 3.4 the object `{block:'nearest'}` is coerced to a
+truthy value → behaves like `scrollIntoView(true)`, which slams the element to the **top of
+the scroll container on every call**. In a D-pad grid this makes navigation jump wildly.
+
+**Fix**: scroll manually with `getBoundingClientRect()` (supported on Chrome 38), only when
+the element is actually outside the viewport:
+```javascript
+function scrollCardIntoView(card) {
+  var area = document.getElementById('grid-area'); // the overflow:auto container
+  var cr = card.getBoundingClientRect();
+  var ar = area.getBoundingClientRect();
+  var pad = 28;
+  if (cr.top < ar.top + pad)            area.scrollTop -= (ar.top + pad - cr.top);
+  else if (cr.bottom > ar.bottom - pad) area.scrollTop += (cr.bottom - (ar.bottom - pad));
+}
+```
+
 ### 2.5 Arrow functions — use with caution
 Arrow functions (`=>`) were added in Chrome 45. If targeting Chrome 38 strictly, use `function` everywhere. In practice WebOS 3.4 builds vary — safe to use `function` to be sure.
 
@@ -321,6 +367,127 @@ During development, use a visible on-screen log element rather than `console.log
 | `calc()` | 26 | YES | — |
 | `position: sticky` | 56 | NO | Use `position: fixed` workaround |
 | CSS Grid `fr` unit | 57 | NO | Use `%` + `calc()` |
+
+---
+
+## 6b. Implemented Features & Patterns (reference for extending the app)
+
+These are working patterns already in the codebase — copy them, don't reinvent.
+
+### Pagination ("Load More")
+- Backend `/youtube/search` and `/youtube/trending` accept `?limit=N&offset=M` and
+  return `{videos, has_more, offset}`. `has_more` is best-effort (true if a full window came back).
+- Frontend keeps `currentLoader(offset, limit) -> url`, `pageOffset`, `hasMore`, `loadingMore`.
+- The grid renders a focusable **Load More card** (`.load-more-card`, also class `.video-card`)
+  as the last item when `hasMore`. Grid navigation counts DOM `.video-card` elements so the
+  Load More card is reachable with the D-pad; Enter on it calls `loadMore()` which **appends**
+  cards (does not rebuild) so focus stays stable.
+
+### Watch history & favorites (localStorage)
+- Keys: `ytv_history` (max 50, most-recent-first) and `ytv_favorites`.
+- Stored as slim objects `{id,url,title,thumbnail,channel,duration}`.
+- Two special tabs (`data-cat="history"`, `data-cat="favorites"`) are `local: true` in `CATS`
+  with a `getItems()` instead of `fetchUrl` — rendered straight from localStorage, no network.
+- **Blue colour button (keyCode 406)** toggles favorite on the focused grid card.
+
+### Skeleton loading
+- `renderSkeletons(n)` fills the grid with `.video-card.skeleton` placeholders during a fetch
+  instead of a spinner. Shimmer via `@keyframes shimmer` on `background-position` (no `aspect-ratio`,
+  no `gap` — WebOS-safe). Skeleton thumb reuses `.video-thumb-wrap` to keep the 16:9 ratio.
+
+### Focus memory
+- `lastFocusByView[currentView]` remembers the last-focused card index per view
+  (`currentView` = category key or `'search:<q>'`). Restored in `renderGrid()`, clamped to range.
+
+### Settings overlay (kills the hardcoded IP)
+- `localStorage 'ytv_server'` always wins over `DEFAULT_SERVER`. Discovery tries saved first.
+- Gear button in the topbar (`#settings-btn`), reachable by D-pad: **Right past the last tab**
+  enters focus zone `'settingsbtn'`. Settings panel has its own arrow-key focus ring
+  (`SETTINGS_FOCUS` array + `settingsIdx`) since TVs have no Tab key.
+- "Save & Reconnect" probes the new URL, persists it, and reloads the trending feed.
+  "Forget Saved Server" clears `ytv_server`.
+
+### Channel avatars (no backend needed)
+- `channelAvatar(name)` renders a coloured circle with the channel's first initial.
+  Colour is a hash of the name into a fixed palette — deterministic, zero network cost.
+
+### Remote keyCode map (LG WebOS) used in this app
+| Key | keyCode | Grid/Home action | Player action |
+|---|---|---|---|
+| Back | 461 / 10009 | up a level | close player |
+| Red | 403 | search focus | close player |
+| Green | 404 | next category | **next video** |
+| Yellow | 405 | previous category | **previous video** |
+| Blue | 406 | toggle favorite | **cycle playback speed** |
+| Play | 415 | — | play |
+| Pause | 19 | — | pause |
+| Stop | 413 | — | close player |
+| Rewind | 412 | — | seek -30s |
+| FastFwd | 417 | — | seek +30s |
+| Vol+/- | 447/448 | — | volume |
+| Mute | 449 | — | mute toggle |
+
+### ⚠️ Magic Remote (pointer) gotcha — critical for video players
+The LG Magic Remote has a **pointer**. When the pointer is active, the **OK/center
+button fires a `click` event at the pointer position — NOT a `keydown` Enter.**
+This is why "OK doesn't pause the video" bugs happen: the keydown handler never fires.
+
+Fix pattern (both must exist):
+1. **Click to toggle** — add a `click` listener that toggles play/pause. Put it on
+   the `<video>` (fires when controls are hidden / `pointer-events:none`) AND on the
+   controls overlay (fires when controls are visible / `pointer-events:all`). Use a
+   manual `isInteractive(target)` DOM walk to ignore clicks on buttons/scrubber —
+   `Element.closest()` is Chrome 41+ and NOT safe on WebOS 3.4.
+2. **Mousemove to reveal controls** — add a `mousemove` listener on the player overlay
+   that calls `showControls()`. Without it, controls never appear for pointer users.
+
+Keep the `keydown` handlers too — they fire when the user is in D-pad mode.
+
+### ⚠️ Remote Back button (keyCode 461) — use HISTORY, not preventDefault
+**Confirmed on real WebOS 3.4 hardware:** the Back button fires `keydown` with
+`e.keyCode === 461`, but **`e.preventDefault()` does NOT stop the system from
+backgrounding the app / opening the launcher** — not in bubble phase, not in capture
+phase. Do not waste time on preventDefault; it doesn't work for Back on this platform.
+
+**Working fix — the history-buffer trick.** WebOS Back navigates browser history when
+there is history to pop, and only closes the app when history is empty. So keep exactly
+one buffer entry and re-arm it on every pop; Back then fires `popstate` (app stays alive)
+and you route the action yourself:
+```javascript
+try { history.pushState(null, ''); } catch (e) {}      // arm one buffer entry
+window.addEventListener('popstate', function () {
+  try { history.pushState(null, ''); } catch (e) {}     // re-arm — Back never exits
+  handleBack();                                         // your own routing
+});
+
+var lastBackTs = 0;
+function handleBack() {
+  var now = Date.now();
+  if (now - lastBackTs < 350) return;   // debounce: stray keydown default + popstate
+  lastBackTs = now;
+  if (settingsOpen) { closeSettings(); return; }
+  if (onPlayer)     { closePlayer();   return; }
+  /* ...else navigate within home... */
+}
+```
+Crucially: **do NOT also handle 461 in your keydown handler** — if you `preventDefault`
+the 461 keydown you cancel the history-back default, so `popstate` never fires. Let the
+keydown fall through untouched; `popstate` owns Back entirely. The user exits the app with
+the **Home** button (standard for TV apps), never Back.
+- `history.pushState` / `popstate` are Chrome 5+ — safe on WebOS 3.4.
+
+### Player features implemented (patterns to reuse)
+- **Resume position** — `localStorage 'ytv_pos_<id>'` holds seconds; saved (throttled
+  every 5s + on pause/close) and restored on `loadedmetadata` if 5s < pos < dur-15s.
+  Cleared on `ended`.
+- **Auto-play next** — `ended` advances to `focusedIdx + 1` (or closes at the end).
+- **Playback speed** — `SPEEDS` array cycled via `vid.playbackRate`; Blue button or the
+  on-screen `#ctrl-speed` button.
+- **Transport buttons** — prev / -10s / play-pause / +10s / next are pointer-clickable
+  (`#ctrl-btns`); D-pad uses the global key actions instead of focusing each button.
+- **Note on screen sleep**: active fullscreen `<video>` playback keeps WebOS awake
+  natively — no extra wake-lock needed during playback. A true wake-lock during long
+  *pauses* needs a luna-service permission (`com.webos.service.tvpower`); not added.
 
 ---
 

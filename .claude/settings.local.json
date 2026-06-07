@@ -8,7 +8,9 @@
       "PowerShell(\\(Get-Content \"C:\\\\Users\\\\PhantomGrogu\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\@webos-tools\\\\cli\\\\node_modules\\\\rimraf\\\\package.json\" | ConvertFrom-Json\\).version)",
       "WebSearch",
       "Bash(ls -la \"d:\\\\SLOPPY APPS\\\\IPTV\\\\\" 2>&1 | head -50)",
-      "Read(//d/SLOPPY APPS/**)"
+      "Read(//d/SLOPPY APPS/**)",
+      "Bash(node --check browser.js)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('youtube.py',encoding='utf-8'\\).read\\(\\)\\); print\\('PY OK'\\)\")"
     ]
   }
 }

@@ -38,6 +38,7 @@ SPDX-License-Identifier: Apache-2.0
       <button id="search-btn">Search</button>
     </div>
     <div id="backend-dot" title="Backend offline"></div>
+    <button id="settings-btn" title="Settings">&#9881;</button>
   </div>
 
   <div id="tabs">
@@ -47,6 +48,8 @@ SPDX-License-Identifier: Apache-2.0
     <button class="tab" data-cat="news">News</button>
     <button class="tab" data-cat="sports">Sports</button>
     <button class="tab" data-cat="movies">Movies</button>
+    <button class="tab" data-cat="history">History</button>
+    <button class="tab" data-cat="favorites">&#9733; Favorites</button>
   </div>
 
   <div id="grid-area">
@@ -57,6 +60,27 @@ SPDX-License-Identifier: Apache-2.0
       <span>Loading…</span>
     </div>
     <div id="error-msg" class="hidden"></div>
+  </div>
+
+  <!-- Favorite / action toast -->
+  <div id="home-toast" class="hidden"></div>
+</div>
+
+<!-- Settings overlay -->
+<div id="settings-overlay" class="hidden">
+  <div id="settings-panel">
+    <h2 id="settings-title">Settings</h2>
+    <label id="settings-label" for="settings-ip">Backend server address</label>
+    <input id="settings-ip" type="text" placeholder="192.168.1.x  or  http://host:8000"
+           autocomplete="off" spellcheck="false">
+    <p id="settings-current"></p>
+    <p id="settings-msg" class="hidden"></p>
+    <div id="settings-actions">
+      <button id="settings-save">Save &amp; Reconnect</button>
+      <button id="settings-forget">Forget Saved Server</button>
+      <button id="settings-close">Close</button>
+    </div>
+    <p id="settings-hint">&#8593;&#8595; Move &nbsp;|&nbsp; OK Select &nbsp;|&nbsp; Back Close</p>
   </div>
 </div>
 
@@ -76,7 +100,10 @@ SPDX-License-Identifier: Apache-2.0
   <div id="player-error" class="hidden">
     <div id="player-error-icon">&#9888;</div>
     <p id="player-error-msg">Could not load video.</p>
-    <button id="player-error-btn">&#8592; Back to Grid</button>
+    <div id="player-error-actions">
+      <button id="player-retry-btn">&#8635; Retry</button>
+      <button id="player-error-btn">&#8592; Back to Grid</button>
+    </div>
   </div>
 
   <!-- Controls overlay -->
@@ -96,9 +123,15 @@ SPDX-License-Identifier: Apache-2.0
       <div id="ctrl-bigicon"></div>
     </div>
 
-    <!-- Bottom bar: play | time | scrubber | vol -->
+    <!-- Bottom bar: buttons | time | scrubber | speed | vol -->
     <div id="ctrl-bottom">
-      <button id="ctrl-playpause">&#9654;</button>
+      <div id="ctrl-btns">
+        <button id="ctrl-prev"    title="Previous (Yellow)">&#9664;&#9664;</button>
+        <button id="ctrl-back10"  title="Back 10s">&#9664;10</button>
+        <button id="ctrl-playpause">&#9654;</button>
+        <button id="ctrl-fwd10"   title="Forward 10s">10&#9658;</button>
+        <button id="ctrl-next"    title="Next (Green)">&#9658;&#9658;</button>
+      </div>
       <span id="ctrl-cur">0:00</span>
       <div id="ctrl-bar-wrap">
         <div id="ctrl-bar-bg">
@@ -108,6 +141,7 @@ SPDX-License-Identifier: Apache-2.0
         </div>
       </div>
       <span id="ctrl-dur">--:--</span>
+      <button id="ctrl-speed" title="Speed (Blue)">1x</button>
       <div id="ctrl-vol-wrap">
         <span id="ctrl-vol-lbl">VOL</span>
         <div id="ctrl-vol-track"><div id="ctrl-vol-fill"></div></div>
@@ -117,7 +151,7 @@ SPDX-License-Identifier: Apache-2.0
 
     <!-- Key-hint strip -->
     <div id="ctrl-hints">
-      OK&nbsp;Play/Pause &nbsp;|&nbsp; &#9668;&#9658;&nbsp;Seek 10s &nbsp;|&nbsp; &#9650;&#9660;&nbsp;Volume &nbsp;|&nbsp; Back&nbsp;Close
+      OK&nbsp;Play/Pause &nbsp;|&nbsp; &#9668;&#9658;&nbsp;Seek 10s &nbsp;|&nbsp; &#9650;&#9660;&nbsp;Volume &nbsp;|&nbsp; Green&nbsp;Next &nbsp;|&nbsp; Yellow&nbsp;Prev &nbsp;|&nbsp; Blue&nbsp;Speed &nbsp;|&nbsp; Back&nbsp;Close
     </div>
 
   </div>

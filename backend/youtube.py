@@ -20,8 +20,10 @@ FLAT_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "extract_flat": True,
-    "playlist_items": "1:16",
 }
+
+# Max results we will ever fetch in a single page request (safety clamp)
+MAX_PAGE = 48
 
 STREAM_HEADERS = {
     "User-Agent": (
@@ -66,22 +68,42 @@ def _extract(url: str) -> dict:
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
+def _clamp_page(limit: int, offset: int):
+    """Sanitise pagination params and return (limit, offset, total_needed)."""
+    offset = max(0, offset)
+    limit = max(1, min(limit, MAX_PAGE))
+    return limit, offset, offset + limit
+
+
+def _flat_opts(total: int) -> dict:
+    opts = dict(FLAT_OPTS)
+    opts["playlist_items"] = f"1:{total}"
+    return opts
+
+
 @router.get("/search")
-async def youtube_search(q: str):
+async def youtube_search(q: str, limit: int = 24, offset: int = 0):
+    limit, offset, total = _clamp_page(limit, offset)
+
     def _search():
-        with yt_dlp.YoutubeDL(FLAT_OPTS) as ydl:
-            result = ydl.extract_info(f"ytsearch16:{q}", download=False)
-        return _parse_entries(result)
+        with yt_dlp.YoutubeDL(_flat_opts(total)) as ydl:
+            result = ydl.extract_info(f"ytsearch{total}:{q}", download=False)
+        entries = _parse_entries(result)
+        page = entries[offset:offset + limit]
+        # has_more is best-effort: full window came back, so a next page may exist
+        return page, len(entries) >= total
 
     try:
-        videos = await asyncio.to_thread(_search)
-        return JSONResponse({"videos": videos})
+        videos, has_more = await asyncio.to_thread(_search)
+        return JSONResponse({"videos": videos, "has_more": has_more, "offset": offset})
     except Exception as exc:
         return JSONResponse({"error": str(exc), "videos": []}, status_code=500)
 
 
 @router.get("/trending")
-async def youtube_trending():
+async def youtube_trending(limit: int = 24, offset: int = 0):
+    limit, offset, total = _clamp_page(limit, offset)
+
     def _trending():
         # Try the public trending playlist first (more reliable than /feed/trending)
         candidates = [
@@ -90,21 +112,22 @@ async def youtube_trending():
         ]
         for src in candidates:
             try:
-                with yt_dlp.YoutubeDL(FLAT_OPTS) as ydl:
+                with yt_dlp.YoutubeDL(_flat_opts(total)) as ydl:
                     result = ydl.extract_info(src, download=False)
                 entries = _parse_entries(result)
                 if entries:
-                    return entries
+                    return entries[offset:offset + limit], len(entries) >= total
             except Exception:
                 continue
         # Final fallback: popular search
-        with yt_dlp.YoutubeDL(FLAT_OPTS) as ydl:
-            result = ydl.extract_info("ytsearch16:trending music 2024", download=False)
-        return _parse_entries(result)
+        with yt_dlp.YoutubeDL(_flat_opts(total)) as ydl:
+            result = ydl.extract_info(f"ytsearch{total}:trending music 2024", download=False)
+        entries = _parse_entries(result)
+        return entries[offset:offset + limit], len(entries) >= total
 
     try:
-        videos = await asyncio.to_thread(_trending)
-        return JSONResponse({"videos": videos})
+        videos, has_more = await asyncio.to_thread(_trending)
+        return JSONResponse({"videos": videos, "has_more": has_more, "offset": offset})
     except Exception as exc:
         return JSONResponse({"error": str(exc), "videos": []}, status_code=500)
 
