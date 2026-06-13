@@ -180,7 +180,8 @@ body {
   outline: 4px solid #ff0000;
   transform: scale(1.06);
   z-index: 2;
-  box-shadow: 0 12px 48px rgba(0,0,0,0.85), 0 0 0 2px rgba(255,255,255,0.15);
+  /* Lighter shadow — a 48px blur is expensive to repaint on TV GPUs */
+  box-shadow: 0 6px 20px rgba(0,0,0,0.7);
 }
 
 /* aspect-ratio not supported on Chrome <88 (WebOS 3.4); use padding-bottom trick */
@@ -202,7 +203,15 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
+  /* Fade in once decoded — hides lazy-load latency */
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  /* Promote the bitmap to its own GPU layer so scaling the focused card
+     composites the cached texture instead of repainting the image (CH38-safe) */
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
 }
+.video-thumb.loaded { opacity: 1; }
 
 .video-dur-badge {
   position: absolute;
@@ -585,7 +594,8 @@ body {
 }
 #ctrl-btns > * + * { margin-left: 6px; }
 #ctrl-btns button,
-#ctrl-speed {
+#ctrl-speed,
+#ctrl-quality {
   font-size: 16px;
   font-weight: 700;
   line-height: 1;
@@ -604,7 +614,8 @@ body {
   min-width: 56px;
 }
 #ctrl-btns button:focus, #ctrl-btns button:hover,
-#ctrl-speed:focus, #ctrl-speed:hover {
+#ctrl-speed:focus, #ctrl-speed:hover,
+#ctrl-quality:focus, #ctrl-quality:hover {
   border-color: #fff;
   background: rgba(255,255,255,0.25);
   outline: none;
@@ -612,7 +623,8 @@ body {
 #ctrl-btns #ctrl-playpause:focus, #ctrl-btns #ctrl-playpause:hover {
   background: #cc0000;
 }
-#ctrl-speed {
+#ctrl-speed,
+#ctrl-quality {
   flex-shrink: 0;
   min-width: 50px;
   text-align: center;

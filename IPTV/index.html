@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1920">
   <title>YouTube TV</title>
+  <!-- Warm DNS for thumbnail host (preconnect is CH46+, dns-prefetch works on CH38) -->
+  <link rel="dns-prefetch" href="https://i.ytimg.com">
   <link rel="stylesheet" href="browser.css">
 </head>
 <body>
@@ -141,6 +143,7 @@ SPDX-License-Identifier: Apache-2.0
         </div>
       </div>
       <span id="ctrl-dur">--:--</span>
+      <button id="ctrl-quality" title="Quality (Red)">Auto</button>
       <button id="ctrl-speed" title="Speed (Blue)">1x</button>
       <div id="ctrl-vol-wrap">
         <span id="ctrl-vol-lbl">VOL</span>
@@ -151,7 +154,7 @@ SPDX-License-Identifier: Apache-2.0
 
     <!-- Key-hint strip -->
     <div id="ctrl-hints">
-      OK&nbsp;Play/Pause &nbsp;|&nbsp; &#9668;&#9658;&nbsp;Seek 10s &nbsp;|&nbsp; &#9650;&#9660;&nbsp;Volume &nbsp;|&nbsp; Green&nbsp;Next &nbsp;|&nbsp; Yellow&nbsp;Prev &nbsp;|&nbsp; Blue&nbsp;Speed &nbsp;|&nbsp; Back&nbsp;Close
+      OK&nbsp;Play/Pause &nbsp;|&nbsp; &#9668;&#9658;&nbsp;Seek 10s &nbsp;|&nbsp; &#9650;&#9660;&nbsp;Volume &nbsp;|&nbsp; Green&nbsp;Next &nbsp;|&nbsp; Yellow&nbsp;Prev &nbsp;|&nbsp; Blue&nbsp;Speed &nbsp;|&nbsp; Red&nbsp;Quality &nbsp;|&nbsp; Back&nbsp;Close
     </div>
 
   </div>

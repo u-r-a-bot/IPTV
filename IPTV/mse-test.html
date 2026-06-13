@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920">
+<title>DASH MSE Player Test</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0f0f0f; color:#eee; font-family:Arial,sans-serif; padding:18px; }
+  h1 { font-size:22px; color:#ff3b3b; margin-bottom:10px; }
+  .row { display:flex; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .row > * { margin-right:10px; margin-bottom:6px; }
+  input { padding:7px 11px; font-size:16px; background:#1e1e1e; color:#fff;
+          border:2px solid #333; border-radius:4px; outline:none; }
+  input:focus { border-color:#fff; }
+  button { padding:9px 18px; font-size:16px; font-weight:700; background:#ff0000;
+           color:#fff; border:2px solid transparent; border-radius:6px; cursor:pointer; }
+  button:focus, button:hover { outline:3px solid #fff; background:#cc0000; }
+  button.alt { background:#2a2a2a; border-color:#444; }
+  #wrap { display:flex; }
+  #logbox { width:740px; height:430px; overflow-y:auto; background:#000; border:1px solid #333;
+            border-radius:6px; padding:10px; font-family:Consolas,monospace; font-size:13px;
+            line-height:1.45; white-space:pre-wrap; }
+  .ok{color:#5fdc5f;} .bad{color:#ff6b6b;} .inf{color:#9ad0ff;} .warn{color:#ffd166;}
+  #right { margin-left:14px; }
+  video { width:780px; height:438px; background:#000; border:1px solid #333; }
+  #stat { font-family:Consolas,monospace; font-size:14px; color:#9ad0ff; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>&#9654; DASH MSE Player Test (no ffmpeg, no disk, seamless)</h1>
+
+  <div class="row">
+    <span>Server:</span><input id="server" type="text" size="26" spellcheck="false">
+    <span>Video id:</span><input id="vid" type="text" size="14" spellcheck="false" value="aqz-KE-bpKQ">
+  </div>
+  <div class="row">
+    <button id="p1080">Play 1080p</button>
+    <button id="p720" class="alt">Play 720p</button>
+    <button id="s10" class="alt">Seek 10%</button>
+    <button id="s50" class="alt">Seek 50%</button>
+    <button id="s90" class="alt">Seek 90%</button>
+    <button id="pp" class="alt">Play/Pause</button>
+    <button id="stop" class="alt">Stop</button>
+    <button id="clear" class="alt">Clear</button>
+  </div>
+
+  <div id="wrap">
+    <div id="logbox"></div>
+    <div id="right">
+      <video id="v"></video>
+      <div id="stat">idle</div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  var AHEAD  = 24;   // seconds to keep buffered ahead of playhead (per track)
+  var BEHIND = 15;   // seconds to keep behind playhead before evicting
+
+  var logbox = document.getElementById('logbox');
+  var statEl = document.getElementById('stat');
+  var video  = document.getElementById('v');
+  function log(m,c){ var d=document.createElement('div'); if(c)d.className=c; d.textContent=m;
+                     logbox.appendChild(d); logbox.scrollTop=logbox.scrollHeight; }
+  function enc(s){ return encodeURIComponent(s); }
+
+  var saved=''; try{ saved=localStorage.getItem('ytv_server')||''; }catch(e){}
+  document.getElementById('server').value = saved || 'http://192.168.0.191:8000';
+  function server(){ return document.getElementById('server').value.replace(/\/+$/,''); }
+  function vidId(){ return document.getElementById('vid').value.replace(/\s+/g,''); }
+
+  var ms=null, objUrl=null, gen=0, duration=0, ready=false, started=false;
+  var tracks={ video:null, audio:null };
+  var curHeight=1080, refreshing=false, refreshCount=0;   // stale-URL auto-refresh
+
+  function newTrack(info){
+    return { info:info, sb:null, idx:0, queue:[], fetching:false,
+             initFetched:false, removePending:false, done:false };
+  }
+  function bEnd(name){ var t=tracks[name]; var sb=t&&t.sb;
+    return (sb&&sb.buffered&&sb.buffered.length)? sb.buffered.end(sb.buffered.length-1):0; }
+
+  function teardown(){
+    gen++; ready=false; started=false;
+    try{ video.pause(); }catch(e){}
+    if(tracks.video&&tracks.video.sb){ try{tracks.video.sb.abort();}catch(e){} }
+    if(tracks.audio&&tracks.audio.sb){ try{tracks.audio.sb.abort();}catch(e){} }
+    try{ if(ms&&ms.readyState==='open') ms.endOfStream(); }catch(e){}
+    try{ video.removeAttribute('src'); video.load(); }catch(e){}
+    if(objUrl){ try{URL.revokeObjectURL(objUrl);}catch(e){} objUrl=null; }
+    ms=null; tracks={video:null,audio:null};
+  }
+
+  function play(height){
+    teardown();
+    curHeight=height; refreshCount=0; refreshing=false;
+    log('--- PLAY '+height+'p ---','inf');
+    var xhr=new XMLHttpRequest();
+    xhr.open('GET', server()+'/youtube/dash?id='+enc(vidId())+'&height='+height, true);
+    xhr.onload=function(){
+      if(xhr.status<200||xhr.status>=300){ log('dash HTTP '+xhr.status,'bad'); return; }
+      var d; try{ d=JSON.parse(xhr.responseText); }catch(e){ log('dash bad json','bad'); return; }
+      if(d.error){ log('dash error: '+d.error,'bad'); return; }
+      duration=d.duration;
+      log('height='+d.height+' duration='+duration+'s  video segs='+d.video.segments.length+
+          ' audio segs='+d.audio.segments.length,'inf');
+      log('video codecs '+d.video.codecs,'inf');
+      log('audio codecs '+d.audio.codecs,'inf');
+      if(!('MediaSource' in window)){ log('no MediaSource','bad'); return; }
+      if(!MediaSource.isTypeSupported(d.video.codecs)){ log('video codec unsupported','bad'); return; }
+      if(!MediaSource.isTypeSupported(d.audio.codecs)){ log('audio codec unsupported','bad'); return; }
+      startMse(d);
+    };
+    xhr.onerror=function(){ log('dash network error','bad'); };
+    xhr.send();
+  }
+
+  function startMse(d){
+    var myGen=++gen;
+    tracks.video=newTrack(d.video);
+    tracks.audio=newTrack(d.audio);
+    ms=new MediaSource();
+    objUrl=URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', function(){
+      if(myGen!==gen) return;
+      try{ if(duration) ms.duration=duration; }catch(e){}
+      addTrack('video'); addTrack('audio');
+      ready=true;
+      log('SourceBuffers ready, fetching init + segments','ok');
+      fetchInit('video',myGen); fetchInit('audio',myGen);
+    });
+    video.src=objUrl; video.load();
+  }
+
+  function addTrack(name){
+    var t=tracks[name];
+    t.sb=ms.addSourceBuffer(t.info.codecs);
+    t.sb.addEventListener('updateend', function(){ onUpd(name); });
+    t.sb.addEventListener('error', function(){ log(name+' SourceBuffer error event','warn'); });
+  }
+
+  function rangeGet(name, a, b, cb){
+    var t=tracks[name];
+    var xhr=new XMLHttpRequest();
+    // Native &range= query (no HTTP Range header → no CORS preflight, 403-resistant)
+    xhr.open('GET', server()+t.info.stream+'&start='+a+'&end='+b, true);
+    xhr.responseType='arraybuffer';
+    xhr.onload=function(){
+      if(xhr.status!==206 && xhr.status!==200){ cb('HTTP '+xhr.status); return; }
+      cb(null, xhr.response);
+    };
+    xhr.onerror=function(){ cb('network'); };
+    xhr.send();
+  }
+
+  function fetchInit(name, myGen){
+    var t=tracks[name];
+    rangeGet(name, 0, t.info.initEnd-1, function(err, data){
+      if(myGen!==gen) return;
+      if(err){
+        if(err.indexOf('403')>=0){ refreshDash(); return; }   // stale URL → refresh
+        log(name+' init '+err,'bad'); return;
+      }
+      t.queue.push(new Uint8Array(data));
+      t.initFetched=true;
+      pump(name, myGen);
+    });
+  }
+
+  function fetchSeg(name, myGen){
+    var t=tracks[name];
+    if(myGen!==gen || t.fetching || t.removePending) return;
+    if(t.idx>=t.info.segments.length){ t.done=true; checkEnd(); return; }
+    var seg=t.info.segments[t.idx];                 // [offset,size,startSec]
+    if(seg[2] - (video.currentTime||0) > AHEAD) return;   // enough ahead
+    t.fetching=true;
+    rangeGet(name, seg[0], seg[0]+seg[1]-1, function(err, data){
+      t.fetching=false;
+      if(myGen!==gen) return;
+      if(err){
+        // YouTube's signed URLs go stale → 403. Refresh them and retry (idx unchanged).
+        if(err.indexOf('403')>=0){ refreshDash(); return; }
+        // other error → brief backoff then retry, don't hammer
+        setTimeout(function(){ if(myGen===gen) pump(name,myGen); }, 1200);
+        return;
+      }
+      refreshCount=0;                               // a good fetch clears the strike count
+      t.queue.push(new Uint8Array(data));
+      t.idx++;
+      pump(name, myGen);
+    });
+  }
+
+  // YouTube's googlevideo URLs are short-lived/session-bound; when they start
+  // returning 403 we silently re-extract fresh ones (same segment map) and resume
+  // from the exact same position — no stop/start needed.
+  function refreshDash(){
+    if(refreshing) return;
+    if(refreshCount>=5){ log('gave up after repeated 403s — press Stop/Play','bad'); return; }
+    refreshing=true; refreshCount++;
+    log('403 → refreshing stream URLs ('+refreshCount+')…','warn');
+    var xhr=new XMLHttpRequest();
+    xhr.open('GET', server()+'/youtube/dash?id='+enc(vidId())+'&height='+curHeight, true);
+    xhr.onload=function(){
+      refreshing=false;
+      if(xhr.status<200||xhr.status>=300){ log('refresh HTTP '+xhr.status,'bad'); return; }
+      var d; try{ d=JSON.parse(xhr.responseText); }catch(e){ log('refresh bad json','bad'); return; }
+      if(d.error){ log('refresh error: '+d.error,'bad'); return; }
+      if(tracks.video) tracks.video.info.stream=d.video.stream;
+      if(tracks.audio) tracks.audio.info.stream=d.audio.stream;
+      log('stream URLs refreshed → resuming','ok');
+      resumeTrack('video'); resumeTrack('audio');
+    };
+    xhr.onerror=function(){ refreshing=false; log('refresh network error','bad'); };
+    xhr.send();
+  }
+  function resumeTrack(name){
+    var t=tracks[name]; if(!t) return;
+    if(!t.initFetched) fetchInit(name, gen); else pump(name, gen);
+  }
+
+  function pump(name, myGen){
+    if(myGen!==gen) return;
+    var t=tracks[name], sb=t.sb;
+    if(!sb || sb.updating) return;
+    if(t.removePending){ t.removePending=false; try{ sb.remove(0, duration+10); return; }catch(e){} }
+    // evict old
+    var cut=(video.currentTime||0)-BEHIND;
+    if(cut>0 && sb.buffered.length && sb.buffered.start(0)<cut){ try{ sb.remove(0,cut); return; }catch(e){} }
+    // append queued
+    if(t.queue.length){
+      var buf=t.queue.shift();
+      try{ sb.appendBuffer(buf); }
+      catch(e){ if(e.name==='QuotaExceededError'){ t.queue.unshift(buf);
+                  try{ sb.remove(0,(video.currentTime||0)-5);}catch(_){} }
+                else log('append '+name+': '+e,'bad'); }
+      return;
+    }
+    // need more
+    fetchSeg(name, myGen);
+    maybeStart();
+  }
+
+  function onUpd(name){ pump(name, gen); maybeStart(); checkEnd(); }
+
+  function maybeStart(){
+    if(started || !ready) return;
+    if(bEnd('video')>0 && bEnd('audio')>0){
+      started=true;
+      log('both tracks buffered -> play()','ok');
+      var pp=video.play(); if(pp&&pp['catch']) pp['catch'](function(e){ log('play() rejected: '+e,'warn'); });
+    }
+  }
+
+  function checkEnd(){
+    if(!ms||ms.readyState!=='open') return;
+    var v=tracks.video, a=tracks.audio; if(!v||!a) return;
+    if(v.idx>=v.info.segments.length && a.idx>=a.info.segments.length &&
+       !v.queue.length && !a.queue.length && v.sb && a.sb && !v.sb.updating && !a.sb.updating){
+      try{ ms.endOfStream(); log('endOfStream()','ok'); }catch(e){}
+    }
+  }
+
+  function seek(frac){
+    if(!ready||!duration){ log('not playing','warn'); return; }
+    var T=Math.max(0, Math.min(duration-1, frac*duration));
+    log('--- SEEK '+(frac*100|0)+'% -> '+T.toFixed(1)+'s ---','inf');
+    gen++; var myGen=gen; started=true;
+    try{ video.currentTime=T; }catch(e){}
+    ['video','audio'].forEach(function(name){
+      var t=tracks[name];
+      t.queue=[]; t.fetching=false; t.done=false; t.removePending=true;
+      var segs=t.info.segments, i=0;
+      for(var k=0;k<segs.length;k++){ if(segs[k][2]<=T) i=k; else break; }
+      t.idx=i;
+      if(t.sb && !t.sb.updating) onUpd(name);   // triggers remove then refill
+    });
+  }
+
+  video.addEventListener('error', function(){
+    var e=video.error?('code '+video.error.code):'?'; log('VIDEO ERROR '+e,'bad'); });
+  video.addEventListener('playing', function(){ log('video: playing','ok'); });
+  video.addEventListener('waiting', function(){ log('video: buffering…','warn'); });
+  video.addEventListener('ended',   function(){ log('video: ended','ok'); });
+  video.addEventListener('timeupdate', function(){
+    if(!ready) return; pump('video',gen); pump('audio',gen);
+  });
+  setInterval(function(){
+    if(!ready){ statEl.textContent='idle'; return; }
+    statEl.textContent='t='+(video.currentTime||0).toFixed(1)+'/'+duration+'s   '+
+      'vBuf='+bEnd('video').toFixed(0)+'s aBuf='+bEnd('audio').toFixed(0)+'s   '+
+      (video.paused?'PAUSED':'playing');
+  },500);
+
+  document.getElementById('p1080').addEventListener('click', function(){ play(1080); });
+  document.getElementById('p720').addEventListener('click',  function(){ play(720); });
+  document.getElementById('s10').addEventListener('click', function(){ seek(0.10); });
+  document.getElementById('s50').addEventListener('click', function(){ seek(0.50); });
+  document.getElementById('s90').addEventListener('click', function(){ seek(0.90); });
+  document.getElementById('pp').addEventListener('click', function(){ if(video.paused) video.play(); else video.pause(); });
+  document.getElementById('stop').addEventListener('click', function(){ teardown(); log('stopped','inf'); statEl.textContent='idle'; });
+  document.getElementById('clear').addEventListener('click', function(){ logbox.innerHTML=''; });
+
+  log("Ready. Click 'Play 1080p'. This streams YouTube's own segments via MSE — should be seamless. Then test the Seek buttons.", 'inf');
+}());
+</script>
+</body>
+</html>

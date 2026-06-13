@@ -13,6 +13,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["GET", "POST", "HEAD"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(proxy_router)

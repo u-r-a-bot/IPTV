@@ -54,8 +54,29 @@
 
   var SPEEDS       = [0.5, 0.75, 1, 1.25, 1.5, 2];
   var speedIdx     = 2;        // index into SPEEDS; 2 == 1x
-  var pendingResume = 0;       // seconds to resume to once metadata loads
   var lastPosSave  = 0;        // throttle timestamp for savePosition
+
+  var currentFormats   = [];   // quality options for the playing video (asc by height)
+  var currentQualityIdx = 0;   // index into currentFormats (highest == default)
+  var currentVideoId   = '';   // id of the playing video (needed for mux stream URLs)
+  var pendingSeek      = 0;     // native-seek (resume / quality switch) after metadata
+  var knownDuration    = 0;     // true video duration from /info (for early UI)
+
+  // ── DASH/MSE engine (720p/1080p): streams YouTube's own video+audio segments
+  // into two SourceBuffers — no ffmpeg, no disk, no seams. Falls back to the
+  // cached /muxed file if MSE is unavailable or the stream fails. ──
+  var dashActive   = false;
+  var dashMs       = null;      // MediaSource
+  var dashObjUrl   = null;
+  var dashGen      = 0;         // bumped on teardown/seek to invalidate async work
+  var dashStarted  = false;     // playback has begun
+  var dashAnchor   = 0;         // time to (re)start playback at
+  var dashHeight   = 0;
+  var dashTracks   = { video: null, audio: null };
+  var dashRefreshing  = false;  // a stale-URL refresh is in flight
+  var dashRefreshCount = 0;
+  var DASH_AHEAD  = 24;         // seconds to keep buffered ahead per track
+  var DASH_BEHIND = 15;         // seconds to keep behind before evicting
 
   // ════════════════════════════════════════════════════════════════════════════
   //  DISCOVERY
@@ -377,6 +398,7 @@
     document.getElementById('ctrl-back10').addEventListener('click', function () { seekBy(-10); });
     document.getElementById('ctrl-fwd10').addEventListener('click', function () { seekBy(+10); });
     document.getElementById('ctrl-speed').addEventListener('click', cycleSpeed);
+    document.getElementById('ctrl-quality').addEventListener('click', cycleQuality);
     document.getElementById('player-error-btn').addEventListener('click', closePlayer);
     document.getElementById('player-retry-btn').addEventListener('click', function () { playVideo(focusedIdx); });
 
@@ -399,11 +421,23 @@
     });
 
     document.getElementById('ctrl-bar-wrap').addEventListener('click', function (e) {
-      var vid = document.getElementById('player-video');
-      if (!vid.duration) return;
+      var dur = totalDuration();
+      if (!dur) return;
       var rect = document.getElementById('ctrl-bar-bg').getBoundingClientRect();
-      vid.currentTime = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * vid.duration;
+      var pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      if (dashActive) dashSeek(pct * dur);
+      else document.getElementById('player-video').currentTime = pct * dur;
       showControls();
+    });
+
+    // Lazy-load thumbnails as the grid scrolls (pointer wheel / momentum), throttled
+    var thumbScrollTimer = null;
+    document.getElementById('grid-area').addEventListener('scroll', function () {
+      if (thumbScrollTimer) return;
+      thumbScrollTimer = setTimeout(function () {
+        thumbScrollTimer = null;
+        loadVisibleThumbs();
+      }, 90);
     });
 
     document.addEventListener('keydown', handleKey);
@@ -550,9 +584,12 @@
       ? '<div class="video-dur-badge">' + fmtDur(v.duration) + '</div>' : '';
     var fav = isFavorite(v) ? '<div class="video-fav-badge">&#9733;</div>' : '';
 
+    // Thumbnail is lazy: native loading="lazy" is a no-op on Chrome 38, so the
+    // src is held in data-src and swapped in by loadVisibleThumbs() only when the
+    // card nears the viewport. This stops 24+ JPEGs decoding at once (the jank).
     card.innerHTML =
       '<div class="video-thumb-wrap">' +
-        '<img class="video-thumb" src="' + esc(v.thumbnail) + '" alt="" loading="lazy">' +
+        '<img class="video-thumb" data-src="' + esc(v.thumbnail) + '" alt="">' +
         badge + fav +
         '<div class="video-play-hint">&#9654; OK</div>' +
       '</div>' +
@@ -563,6 +600,11 @@
           '<div class="video-meta">'  + esc(v.channel) + '</div>' +
         '</div>' +
       '</div>';
+
+    // Fade the image in once decoded; on error stop hiding it (avoids a blank card)
+    var img = card.querySelector('.video-thumb');
+    img.addEventListener('load',  function () { img.classList.add('loaded'); });
+    img.addEventListener('error', function () { img.classList.add('loaded'); });
 
     card.addEventListener('click', function () { playVideo(i); });
     return card;
@@ -594,6 +636,7 @@
     if (want == null) want = 0;
     var max = grid.querySelectorAll('.video-card').length - 1;
     focusCard(Math.max(0, Math.min(want, max)));
+    loadVisibleThumbs();
   }
 
   // Append newly fetched cards without rebuilding existing ones (keeps focus stable)
@@ -603,6 +646,7 @@
     if (lm) grid.removeChild(lm);
     more.forEach(function (v, k) { grid.appendChild(makeCard(v, startIdx + k)); });
     if (hasMore) grid.appendChild(makeLoadMoreCard());
+    loadVisibleThumbs();
   }
 
   function setLoadMoreCard(state) {
@@ -642,6 +686,7 @@
     if (idx >= 0 && idx < cards.length) {
       cards[idx].classList.add('focused');
       scrollCardIntoView(cards[idx]);
+      loadVisibleThumbs();
     }
     focusedIdx = idx;
     focusZone  = 'grid';
@@ -662,6 +707,24 @@
     } else if (cr.bottom > ar.bottom - pad) {
       area.scrollTop += (cr.bottom - (ar.bottom - pad));
     }
+  }
+
+  // ── Lazy thumbnail loading (manual — IntersectionObserver is Chrome 51+) ────────
+  // Swaps data-src → src for any thumbnail within one screen of the viewport.
+  // Cheap: one getBoundingClientRect per still-unloaded image.
+  function loadVisibleThumbs() {
+    var area = document.getElementById('grid-area');
+    if (!area) return;
+    var ar     = area.getBoundingClientRect();
+    var margin = ar.height || 600;          // preload roughly one screen ahead
+    var imgs   = document.querySelectorAll('.video-thumb[data-src]');
+    [].forEach.call(imgs, function (img) {
+      var r = img.getBoundingClientRect();
+      if (r.bottom >= ar.top - margin && r.top <= ar.bottom + margin) {
+        img.src = img.getAttribute('data-src');
+        img.removeAttribute('data-src');
+      }
+    });
   }
 
   // ── Channel avatar (coloured initial — no backend needed) ───────────────────────
@@ -700,8 +763,8 @@
     if (!v) return;
     focusedIdx = idx;
     onPlayer   = true;
+    currentVideoId = v.id || '';
     recordHistory(v);
-    pendingResume = getSavedPosition(v.id);
 
     document.getElementById('ctrl-title').textContent   = v.title;
     document.getElementById('ctrl-channel').textContent = v.channel || '';
@@ -724,18 +787,30 @@
     vid.load();
     vid.volume = playerVolume;
 
+    currentFormats    = [];
+    currentQualityIdx = 0;
+    pendingSeek       = 0;
+    knownDuration     = 0;
+
     xhrGet(API + '/youtube/info?url=' + enc(v.url), 20000)
       .then(function (data) {
-        if (data.error)       throw new Error(data.error);
-        if (!data.stream_url) throw new Error('No playable stream found for this video.');
-        vid.src = API + '/youtube/stream?url=' + enc(data.stream_url);
-        var pp = vid.play();
-        if (pp !== undefined) {
-          pp.catch(function () {
-            document.getElementById('player-loading').style.display = 'none';
-            showControls(true);
-          });
+        if (data.error) throw new Error(data.error);
+        knownDuration  = data.duration || 0;
+        currentFormats = data.qualities || [];
+        if (!currentFormats.length) {
+          if (!data.stream_url) throw new Error('No playable stream found for this video.');
+          currentFormats = [{ height: 0, label: 'Auto', mode: 'progressive', stream_url: data.stream_url }];
         }
+        var idx0 = currentFormats.length - 1;   // default to the highest quality
+
+        // Resume from saved position if meaningfully into the video.
+        var resume  = getSavedPosition(v.id);
+        var startAt = 0;
+        if (resume > 5 && knownDuration && resume < knownDuration - 15) {
+          startAt = resume;
+          showToast('Resumed from ' + fmtDur(resume));
+        }
+        loadQuality(idx0, startAt);
       })
       .catch(function (e) {
         document.getElementById('player-loading').style.display = 'none';
@@ -746,7 +821,8 @@
 
   function closePlayer() {
     var vid = document.getElementById('player-video');
-    savePosition(videos[focusedIdx], vid.currentTime, vid.duration);
+    savePosition(videos[focusedIdx], realTime(), totalDuration());
+    dashTeardown();
     vid.pause();
     vid.removeAttribute('src');
     vid.load();
@@ -781,31 +857,32 @@
       showControls(true);
     });
     vid.addEventListener('loadedmetadata', function () {
-      document.getElementById('ctrl-dur').textContent = fmtDur(Math.floor(vid.duration));
+      document.getElementById('ctrl-dur').textContent = fmtDur(Math.floor(totalDuration()));
       applySpeed();
-      // Resume from saved position (if a meaningful way in and not near the end)
-      if (pendingResume > 5 && pendingResume < vid.duration - 15) {
-        try { vid.currentTime = pendingResume; } catch (e) {}
-        showToast('Resumed from ' + fmtDur(pendingResume));
+      // Seek to resume point / position carried across a quality switch.
+      if (pendingSeek > 0) {
+        try { vid.currentTime = pendingSeek; } catch (e) {}
       }
-      pendingResume = 0;
+      pendingSeek = 0;
     });
     vid.addEventListener('timeupdate', function () {
-      if (!vid.duration) return;
-      var pct = (vid.currentTime / vid.duration * 100).toFixed(2) + '%';
+      if (dashActive) dashTick();                    // keep segments flowing / evict
+      var dur = totalDuration();
+      if (!dur) return;
+      var cur = realTime();
+      var pct = Math.min(100, cur / dur * 100).toFixed(2) + '%';
       document.getElementById('ctrl-bar-fill').style.width = pct;
       document.getElementById('ctrl-bar-dot').style.left   = pct;
-      document.getElementById('ctrl-cur').textContent = fmtDur(Math.floor(vid.currentTime));
+      document.getElementById('ctrl-cur').textContent = fmtDur(Math.floor(cur));
       if (vid.buffered.length > 0) {
-        var bufEnd = vid.buffered.end(vid.buffered.length - 1);
         document.getElementById('ctrl-bar-buf').style.width =
-          (bufEnd / vid.duration * 100).toFixed(2) + '%';
+          Math.min(100, vid.buffered.end(vid.buffered.length - 1) / dur * 100).toFixed(2) + '%';
       }
       // Persist position at most once every 5s
       var now = Date.now();
       if (now - lastPosSave > 5000) {
         lastPosSave = now;
-        savePosition(videos[focusedIdx], vid.currentTime, vid.duration);
+        savePosition(videos[focusedIdx], cur, dur);
       }
     });
     vid.addEventListener('ended', function () {
@@ -875,6 +952,285 @@
     document.getElementById('ctrl-speed').textContent = SPEEDS[speedIdx] + 'x';
   }
 
+  // ── Position helpers ────────────────────────────────────────────────────────────
+  function realTime() {
+    return document.getElementById('player-video').currentTime || 0;
+  }
+  function totalDuration() {
+    var vid = document.getElementById('player-video');
+    return vid.duration || knownDuration || 0;
+  }
+
+  // ── Load a quality at a given time ──────────────────────────────────────────────
+  // Both 'mux' (720p/1080p via /muxed) and 'progressive' (360p via /stream) return
+  // a complete, byte-seekable MP4 — the only kind WebOS 3.4's native <video> plays —
+  // so playback and seeking are native. `atTime` is applied once metadata loads.
+  function loadQuality(idx, atTime) {
+    if (idx < 0 || idx >= currentFormats.length) return;
+    dashTeardown();                                   // stop any running MSE session
+    currentQualityIdx = idx;
+    var f   = currentFormats[idx];
+    var vid = document.getElementById('player-video');
+
+    document.getElementById('ctrl-quality').textContent = f.label;
+    document.getElementById('player-loading').style.display = 'flex';
+
+    // 720p/1080p → DASH/MSE streaming (no disk, no wait). Needs codec info + MSE.
+    if (f.mode === 'mux' && f.codecs && dashSupported()) {
+      dashStart(f, atTime);
+      return;
+    }
+    // 720p/1080p without MSE → cached complete MP4. 360p → progressive proxy.
+    pendingSeek = Math.max(0, atTime || 0);
+    if (f.mode === 'mux') {
+      document.getElementById('player-loading-title').textContent =
+        'Preparing ' + f.label + '… (first time only)';
+      vid.src = API + '/youtube/muxed?id=' + enc(currentVideoId) + '&height=' + f.height;
+    } else {
+      document.getElementById('player-loading-title').textContent = 'Loading ' + f.label + '…';
+      vid.src = API + '/youtube/stream?url=' + enc(f.stream_url);
+    }
+    vid.load();
+    var pp = vid.play();
+    if (pp !== undefined) {
+      pp.catch(function () {
+        document.getElementById('player-loading').style.display = 'none';
+        showControls(true);
+      });
+    }
+  }
+
+  // ── Video quality cycling (Red / quality button) ───────────────────────────────
+  function cycleQuality() {
+    if (currentFormats.length < 2) { showToast('Only one quality available'); return; }
+    var nextIdx = (currentQualityIdx + 1) % currentFormats.length;
+    showToast('Quality: ' + currentFormats[nextIdx].label);
+    loadQuality(nextIdx, realTime());   // keep the viewer's position across the switch
+    showControls();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  DASH / MSE STREAMING ENGINE
+  // ════════════════════════════════════════════════════════════════════════════
+  function dashSupported() {
+    return ('MediaSource' in window) && typeof MediaSource.isTypeSupported === 'function';
+  }
+  function dashNewTrack(info) {
+    return { info: info, sb: null, idx: 0, queue: [], fetching: false,
+             initFetched: false, removePending: false, done: false };
+  }
+  function dashBufEnd(name) {
+    var t = dashTracks[name], sb = t && t.sb;
+    return (sb && sb.buffered && sb.buffered.length) ? sb.buffered.end(sb.buffered.length - 1) : 0;
+  }
+
+  function dashStart(f, atTime) {
+    dashTeardown();
+    var myGen = ++dashGen;
+    dashActive = true; dashStarted = false; dashRefreshing = false; dashRefreshCount = 0;
+    dashAnchor = Math.max(0, atTime || 0);
+    dashHeight = f.height;
+    pendingSeek = 0;                                 // DASH manages position itself
+    document.getElementById('ctrl-quality').textContent = f.label;
+    document.getElementById('player-loading').style.display = 'flex';
+    document.getElementById('player-loading-title').textContent = 'Loading ' + f.label + '…';
+
+    xhrGet(API + '/youtube/dash?id=' + enc(currentVideoId) + '&height=' + f.height, 20000)
+      .then(function (d) {
+        if (myGen !== dashGen) return;
+        if (d.error) throw new Error(d.error);
+        if (!dashSupported() || !MediaSource.isTypeSupported(d.video.codecs)
+            || !MediaSource.isTypeSupported(d.audio.codecs)) {
+          throw new Error('codec unsupported');
+        }
+        knownDuration = d.duration || knownDuration;
+        dashTracks.video = dashNewTrack(d.video);
+        dashTracks.audio = dashNewTrack(d.audio);
+        dashMs = new MediaSource();
+        dashObjUrl = URL.createObjectURL(dashMs);
+        dashMs.addEventListener('sourceopen', function () {
+          if (myGen !== dashGen) return;
+          try { if (knownDuration) dashMs.duration = knownDuration; } catch (e) {}
+          dashAddTrack('video'); dashAddTrack('audio');
+          dashFetchInit('video', myGen); dashFetchInit('audio', myGen);
+        });
+        var vid = document.getElementById('player-video');
+        vid.src = dashObjUrl; vid.load();
+      })
+      .catch(function (e) {
+        if (myGen !== dashGen) return;
+        dashFallback(f, atTime, e && e.message);     // cached /muxed fallback
+      });
+  }
+
+  // If DASH/MSE can't run, fall back to the cached complete-MP4 file (native).
+  function dashFallback(f, atTime, why) {
+    if (window.console && console.warn) console.warn('DASH unavailable (' + why + ') — using cached muxed file');
+    dashTeardown();
+    var vid = document.getElementById('player-video');
+    pendingSeek = Math.max(0, atTime || 0);
+    document.getElementById('player-loading').style.display = 'flex';
+    document.getElementById('player-loading-title').textContent = 'Preparing ' + f.label + '… (first time only)';
+    vid.src = API + '/youtube/muxed?id=' + enc(currentVideoId) + '&height=' + f.height;
+    vid.load();
+    var pp = vid.play(); if (pp !== undefined) pp.catch(function () {});
+  }
+
+  function dashTeardown() {
+    dashGen++; dashActive = false; dashStarted = false; dashRefreshing = false;
+    var v = dashTracks.video, a = dashTracks.audio;
+    if (v && v.sb) { try { v.sb.abort(); } catch (e) {} }
+    if (a && a.sb) { try { a.sb.abort(); } catch (e) {} }
+    try { if (dashMs && dashMs.readyState === 'open') dashMs.endOfStream(); } catch (e) {}
+    if (dashObjUrl) { try { URL.revokeObjectURL(dashObjUrl); } catch (e) {} dashObjUrl = null; }
+    dashMs = null; dashTracks = { video: null, audio: null };
+  }
+
+  function dashAddTrack(name) {
+    var t = dashTracks[name];
+    t.sb = dashMs.addSourceBuffer(t.info.codecs);
+    t.sb.addEventListener('updateend', function () { dashOnUpd(name); });
+  }
+
+  function dashRangeGet(name, a, b, cb) {
+    var t = dashTracks[name];
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', API + t.info.stream + '&start=' + a + '&end=' + b, true);
+    xhr.responseType = 'arraybuffer';
+    xhr.onload = function () {
+      if (xhr.status !== 206 && xhr.status !== 200) { cb('HTTP ' + xhr.status); return; }
+      cb(null, xhr.response);
+    };
+    xhr.onerror = function () { cb('network'); };
+    xhr.send();
+  }
+
+  function dashFetchInit(name, myGen) {
+    var t = dashTracks[name];
+    dashRangeGet(name, 0, t.info.initEnd - 1, function (err, data) {
+      if (myGen !== dashGen) return;
+      if (err) { if (err.indexOf('403') >= 0) dashRefresh(); return; }
+      t.queue.push(new Uint8Array(data));
+      t.initFetched = true;
+      dashPump(name, myGen);
+    });
+  }
+
+  function dashFetchSeg(name, myGen) {
+    var t = dashTracks[name];
+    if (myGen !== dashGen || t.fetching || t.removePending) return;
+    if (t.idx >= t.info.segments.length) { t.done = true; dashCheckEnd(); return; }
+    var seg = t.info.segments[t.idx];                 // [offset, size, startSec]
+    if (seg[2] - realTime() > DASH_AHEAD) return;     // enough buffered ahead
+    t.fetching = true;
+    dashRangeGet(name, seg[0], seg[0] + seg[1] - 1, function (err, data) {
+      t.fetching = false;
+      if (myGen !== dashGen) return;
+      if (err) {
+        if (err.indexOf('403') >= 0) { dashRefresh(); return; }   // stale URL → refresh
+        setTimeout(function () { if (myGen === dashGen) dashPump(name, myGen); }, 1200);
+        return;
+      }
+      dashRefreshCount = 0;
+      t.queue.push(new Uint8Array(data));
+      t.idx++;
+      dashPump(name, myGen);
+    });
+  }
+
+  function dashPump(name, myGen) {
+    if (myGen !== dashGen) return;
+    var t = dashTracks[name], sb = t && t.sb;
+    if (!sb || sb.updating) return;
+    if (t.removePending) { t.removePending = false; try { sb.remove(0, totalDuration() + 10); return; } catch (e) {} }
+    var cut = realTime() - DASH_BEHIND;               // evict old buffer
+    if (cut > 0 && sb.buffered.length && sb.buffered.start(0) < cut) { try { sb.remove(0, cut); return; } catch (e) {} }
+    if (t.queue.length) {
+      var buf = t.queue.shift();
+      try { sb.appendBuffer(buf); }
+      catch (e) {
+        if (e && e.name === 'QuotaExceededError') { t.queue.unshift(buf);
+          try { sb.remove(0, realTime() - 5); } catch (_) {} }
+        else if (window.console && console.warn) console.warn('append ' + name + ': ' + e);
+      }
+      return;
+    }
+    dashFetchSeg(name, myGen);
+    dashMaybeStart();
+  }
+
+  function dashOnUpd(name) {
+    if (!dashActive) return;
+    dashPump(name, dashGen); dashMaybeStart(); dashCheckEnd();
+  }
+
+  function dashMaybeStart() {
+    if (dashStarted || !dashActive) return;
+    if (dashBufEnd('video') > 0 && dashBufEnd('audio') > 0) {
+      dashStarted = true;
+      document.getElementById('player-loading').style.display = 'none';
+      var vid = document.getElementById('player-video');
+      if (dashAnchor > 0) { try { vid.currentTime = dashAnchor; } catch (e) {} }
+      applySpeed();
+      var pp = vid.play(); if (pp !== undefined) pp.catch(function () {});
+    }
+  }
+
+  function dashCheckEnd() {
+    if (!dashMs || dashMs.readyState !== 'open') return;
+    var v = dashTracks.video, a = dashTracks.audio; if (!v || !a) return;
+    if (v.idx >= v.info.segments.length && a.idx >= a.info.segments.length &&
+        !v.queue.length && !a.queue.length && v.sb && a.sb && !v.sb.updating && !a.sb.updating) {
+      try { dashMs.endOfStream(); } catch (e) {}
+    }
+  }
+
+  function dashTick() {
+    if (!dashActive) return;
+    dashPump('video', dashGen); dashPump('audio', dashGen);
+  }
+
+  function dashSeek(T) {
+    if (!dashActive) return;
+    var dur = totalDuration(); if (!dur) return;
+    T = Math.max(0, Math.min(dur - 1, T));
+    dashGen++; var myGen = dashGen; dashStarted = true; dashAnchor = T;
+    var vid = document.getElementById('player-video');
+    try { vid.currentTime = T; } catch (e) {}
+    var names = ['video', 'audio'];
+    for (var n = 0; n < names.length; n++) {
+      var t = dashTracks[names[n]]; if (!t) continue;
+      t.queue = []; t.fetching = false; t.done = false; t.removePending = true;
+      var segs = t.info.segments, i = 0;
+      for (var k = 0; k < segs.length; k++) { if (segs[k][2] <= T) i = k; else break; }
+      t.idx = i;
+      if (t.sb && !t.sb.updating) dashOnUpd(names[n]);
+    }
+    showControls();
+  }
+
+  // YouTube's signed URLs are short-lived; on 403 we silently re-extract fresh
+  // ones (same segment map) and resume from the same position — no interruption.
+  function dashRefresh() {
+    if (dashRefreshing) return;
+    if (dashRefreshCount >= 5) { if (window.console && console.warn) console.warn('DASH: gave up after repeated 403s'); return; }
+    dashRefreshing = true; dashRefreshCount++;
+    var refGen = dashGen;
+    xhrGet(API + '/youtube/dash?id=' + enc(currentVideoId) + '&height=' + dashHeight, 20000)
+      .then(function (d) {
+        dashRefreshing = false;
+        if (refGen !== dashGen || !dashActive || d.error) return;
+        if (dashTracks.video) dashTracks.video.info.stream = d.video.stream;
+        if (dashTracks.audio) dashTracks.audio.info.stream = d.audio.stream;
+        dashResumeTrack('video'); dashResumeTrack('audio');
+      })
+      .catch(function () { dashRefreshing = false; });
+  }
+  function dashResumeTrack(name) {
+    var t = dashTracks[name]; if (!t) return;
+    if (!t.initFetched) dashFetchInit(name, dashGen); else dashPump(name, dashGen);
+  }
+
   // ── Resume position (per-video, localStorage) ─────────────────────────────────────
   function posKey(id) { return 'ytv_pos_' + id; }
   function savePosition(v, t, dur) {
@@ -899,9 +1255,11 @@
   }
 
   function seekBy(secs) {
-    var vid = document.getElementById('player-video');
-    if (!vid.duration) return;
-    vid.currentTime = Math.max(0, Math.min(vid.duration, vid.currentTime + secs));
+    var dur = totalDuration();
+    if (!dur) return;
+    var target = Math.max(0, Math.min(dur - 1, realTime() + secs));
+    if (dashActive) dashSeek(target);
+    else document.getElementById('player-video').currentTime = target;
     showToast(secs > 0 ? '+' + secs + 's  >>' : '<< ' + Math.abs(secs) + 's');
     showControls();
   }
@@ -971,7 +1329,7 @@
       if (UP)    { changeVolume(+0.1); e.preventDefault(); return; }
       if (DOWN)  { changeVolume(-0.1); e.preventDefault(); return; }
       if (OK)    { togglePlayPause();  e.preventDefault(); return; }
-      if (kc === 403)             { closePlayer();      e.preventDefault(); return; }
+      if (kc === 403)             { cycleQuality();     e.preventDefault(); return; }  // Red
       if (kc === 415)             { document.getElementById('player-video').play();  showControls(); e.preventDefault(); return; }
       if (kc === 19)              { document.getElementById('player-video').pause(); showControls(); e.preventDefault(); return; }
       if (kc === 413)             { closePlayer();      e.preventDefault(); return; }

@@ -10,7 +10,30 @@
       "Bash(ls -la \"d:\\\\SLOPPY APPS\\\\IPTV\\\\\" 2>&1 | head -50)",
       "Read(//d/SLOPPY APPS/**)",
       "Bash(node --check browser.js)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('youtube.py',encoding='utf-8'\\).read\\(\\)\\); print\\('PY OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('youtube.py',encoding='utf-8'\\).read\\(\\)\\); print\\('PY OK'\\)\")",
+      "Bash(python -m py_compile youtube.py)",
+      "Bash(py -m py_compile youtube.py)",
+      "Bash(python3 -m py_compile youtube.py)",
+      "Bash(where ffmpeg *)",
+      "Bash(ffmpeg -version)",
+      "Bash(findstr /i \"version\")",
+      "Bash(dir /b)",
+      "Bash(dir /b backend)",
+      "PowerShell(conda activate mlenv)",
+      "PowerShell(python -c \"import yt_dlp, shutil; print\\('yt_dlp', yt_dlp.version.__version__\\); print\\('ffmpeg', shutil.which\\('ffmpeg'\\)\\)\")",
+      "PowerShell($c = Get-Command conda -ErrorAction SilentlyContinue; if \\($c\\) { $c.Source } else { \"conda not on PATH\" }; if \\(Test-Path \"$env:USERPROFILE\\\\anaconda3\\\\Scripts\\\\conda.exe\"\\) { \"FOUND anaconda3\" }; if \\(Test-Path \"$env:USERPROFILE\\\\miniconda3\\\\Scripts\\\\conda.exe\"\\) { \"FOUND miniconda3\" })",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" run -n mlenv python -c \"import yt_dlp, shutil; print\\('yt_dlp', yt_dlp.version.__version__\\); print\\('ffmpeg', shutil.which\\('ffmpeg'\\)\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" run -n mlenv python -c \"import yt_dlp; o={'quiet':True,'no_warnings':True}; i=yt_dlp.YoutubeDL\\(o\\).extract_info\\('https://www.youtube.com/watch?v=aqz-KE-bpKQ',download=False\\); fs=[f for f in i['formats'] if f.get\\('vcodec'\\) not in \\(None,'none'\\)]; print\\('itag  ext   res     vcodec        acodec'\\); [print\\(str\\(f.get\\('format_id'\\)\\).ljust\\(5\\), str\\(f.get\\('ext'\\)\\).ljust\\(5\\), str\\(f.get\\('height'\\)\\).ljust\\(6\\), str\\(f.get\\('vcodec'\\)\\)[:12].ljust\\(13\\), f.get\\('acodec'\\)\\) for f in fs]\")",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" install -n mlenv -c conda-forge ffmpeg -y)",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" run -n mlenv python -c \"import shutil; print\\('ffmpeg ->', shutil.which\\('ffmpeg'\\)\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\envs\\\\mlenv\\\\Library\\\\bin\\\\ffmpeg.exe\" -version)",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" run -n mlenv pip install imageio-ffmpeg 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\condabin\\\\conda.bat\" run -n mlenv python -c \"import imageio_ffmpeg as i; exe=i.get_ffmpeg_exe\\(\\); print\\('EXE',exe\\); import subprocess; r=subprocess.run\\([exe,'-version'],capture_output=True,text=True\\); print\\(r.stdout.splitlines\\(\\)[0] if r.stdout else 'NO OUTPUT','rc',r.returncode\\)\")",
+      "PowerShell($f = \"C:\\\\Users\\\\PhantomGrogu\\\\anaconda3\\\\envs\\\\mlenv\\\\Lib\\\\site-packages\\\\imageio_ffmpeg\\\\binaries\\\\ffmpeg-win-x86_64-v7.1.exe\"; $out = & $f -i \"$env:TEMP\\\\ytv_cache\\\\jNQXAC9IVRw_720.mp4\" 2>&1 | Out-String; \\($out -split \"`n\" | Select-String -Pattern \"Stream #|Duration\"\\))",
+      "PowerShell($d = Join-Path $env:TEMP 'ytv_cache'; \"CACHE DIR: $d\"; if \\(Test-Path $d\\) { Get-ChildItem $d -Recurse -File | Select-Object FullName, @{n='MB';e={[math]::Round\\($_.Length/1MB,1\\)}} | Format-Table -AutoSize; \"TOTAL MB: \" + [math]::Round\\(\\(\\(Get-ChildItem $d -Recurse -File | Measure-Object Length -Sum\\).Sum/1MB\\),1\\) } else { \"not created yet\" })",
+      "Bash(sleep 20 && cat \"C:\\\\Users\\\\PHANTO~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--SLOPPY-APPS-IPTV\\\\c329a21d-98fb-4c0c-997c-123417a5de84\\\\tasks\\\\b29198ffo.output\" 2>/dev/null || cat \"/c/Users/PHANTO~1/AppData/Local/Temp/claude/d--SLOPPY-APPS-IPTV/c329a21d-98fb-4c0c-997c-123417a5de84/tasks/b29198ffo.output\")",
+      "Read(//c/Users/PHANTO~1/AppData/Local/Temp/claude/d--SLOPPY-APPS-IPTV/c329a21d-98fb-4c0c-997c-123417a5de84/tasks/**)",
+      "Read(//c/Users/PhantomGrogu/AppData/Local/Temp/claude/d--SLOPPY-APPS-IPTV/c329a21d-98fb-4c0c-997c-123417a5de84/tasks/**)"
     ]
   }
 }
