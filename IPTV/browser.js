@@ -58,6 +58,7 @@
 
   var currentFormats   = [];   // quality options for the playing video (asc by height)
   var currentQualityIdx = 0;   // index into currentFormats (highest == default)
+  var activeMenu       = null; // open navigable menu (quality/speed) or null
   var currentVideoId   = '';   // id of the playing video (needed for mux stream URLs)
   var pendingSeek      = 0;     // native-seek (resume / quality switch) after metadata
   var knownDuration    = 0;     // true video duration from /info (for early UI)
@@ -397,8 +398,8 @@
     document.getElementById('ctrl-next').addEventListener('click', playNext);
     document.getElementById('ctrl-back10').addEventListener('click', function () { seekBy(-10); });
     document.getElementById('ctrl-fwd10').addEventListener('click', function () { seekBy(+10); });
-    document.getElementById('ctrl-speed').addEventListener('click', cycleSpeed);
-    document.getElementById('ctrl-quality').addEventListener('click', cycleQuality);
+    document.getElementById('ctrl-speed').addEventListener('click', openSpeedMenu);
+    document.getElementById('ctrl-quality').addEventListener('click', openQualityMenu);
     document.getElementById('player-error-btn').addEventListener('click', closePlayer);
     document.getElementById('player-retry-btn').addEventListener('click', function () { playVideo(focusedIdx); });
 
@@ -460,6 +461,7 @@
     if (now - lastBackTs < 350) return;
     lastBackTs = now;
 
+    if (activeMenu)   { menuClose();     return; }
     if (settingsOpen) { closeSettings(); return; }
     if (onPlayer)     { closePlayer();   return; }
     if (focusZone === 'tabs' || focusZone === 'settingsbtn' || focusZone === 'search') {
@@ -801,7 +803,7 @@
           if (!data.stream_url) throw new Error('No playable stream found for this video.');
           currentFormats = [{ height: 0, label: 'Auto', mode: 'progressive', stream_url: data.stream_url }];
         }
-        var idx0 = currentFormats.length - 1;   // default to the highest quality
+        var idx0 = pickDefaultIdx();             // highest playable ≤1080p (4K is opt-in)
 
         // Resume from saved position if meaningfully into the video.
         var resume  = getSavedPosition(v.id);
@@ -822,6 +824,7 @@
   function closePlayer() {
     var vid = document.getElementById('player-video');
     savePosition(videos[focusedIdx], realTime(), totalDuration());
+    menuClose();
     dashTeardown();
     vid.pause();
     vid.removeAttribute('src');
@@ -940,12 +943,6 @@
   }
 
   // ── Playback speed ──────────────────────────────────────────────────────────────
-  function cycleSpeed() {
-    speedIdx = (speedIdx + 1) % SPEEDS.length;
-    applySpeed();
-    showToast('Speed ' + SPEEDS[speedIdx] + '×');
-    showControls();
-  }
   function applySpeed() {
     var vid = document.getElementById('player-video');
     try { vid.playbackRate = SPEEDS[speedIdx]; } catch (e) {}
@@ -1000,13 +997,157 @@
     }
   }
 
-  // ── Video quality cycling (Red / quality button) ───────────────────────────────
-  function cycleQuality() {
-    if (currentFormats.length < 2) { showToast('Only one quality available'); return; }
-    var nextIdx = (currentQualityIdx + 1) % currentFormats.length;
-    showToast('Quality: ' + currentFormats[nextIdx].label);
-    loadQuality(nextIdx, realTime());   // keep the viewer's position across the switch
-    showControls();
+  // ── Quality picker (Red / quality button → menu of options) ─────────────────────
+  // A format is playable if: progressive (native), or mp4/avc1 mux (MSE *or* the
+  // /muxed native fallback can serve it), or webm/VP9 mux only where the TV's MSE
+  // actually supports VP9+Opus — so 1440p/2160p just won't appear on TVs that can't
+  // decode them, rather than failing.
+  function formatPlayable(f) {
+    if (!f) return false;
+    if (f.mode !== 'mux') return true;
+    if (f.container === 'webm') {
+      return dashSupported() && f.codecs && f.acodecs
+          && MediaSource.isTypeSupported(f.codecs)
+          && MediaSource.isTypeSupported(f.acodecs);
+    }
+    return true;                                   // mp4/avc1: native-decodable on this TV
+  }
+
+  // Default: best playable quality at ≤1080p (4K is bandwidth-heavy → opt-in via menu).
+  function pickDefaultIdx() {
+    var hi = -1, hiCap = -1;
+    for (var i = 0; i < currentFormats.length; i++) {
+      if (!formatPlayable(currentFormats[i])) continue;
+      if (hi < 0 || currentFormats[i].height > currentFormats[hi].height) hi = i;
+      if (currentFormats[i].height <= 1080 &&
+          (hiCap < 0 || currentFormats[i].height > currentFormats[hiCap].height)) hiCap = i;
+    }
+    return hiCap >= 0 ? hiCap : (hi >= 0 ? hi : 0);
+  }
+
+  // ── Generic navigable menu (D-pad + Magic-Remote cursor) ────────────────────────
+  // Drives both the quality and speed pickers. opts = { kind, el, listEl, anchorEl,
+  // items:[{ html, current, onSelect }], idx }. Rows hover-to-focus and click-to-
+  // select; a click outside the panel dismisses it.
+  function menuOpen(opts) {
+    menuClose();
+    opts.listEl.innerHTML = '';
+    opts.items.forEach(function (it, i) {
+      var row = document.createElement('div');
+      row.className = 'menu-row' + (it.current ? ' current' : '');
+      row.innerHTML = it.html;
+      row.addEventListener('mouseenter', function () { menuFocus(i); });
+      row.addEventListener('click', function (e) { e.stopPropagation(); menuSelect(i); });
+      opts.listEl.appendChild(row);
+    });
+    activeMenu = opts;
+    opts.el.classList.remove('hidden');
+    menuFocus(opts.idx || 0);
+    showControls(true);
+    // Defer so the click that opened the menu doesn't immediately dismiss it.
+    setTimeout(function () { document.addEventListener('click', menuOutside, true); }, 0);
+  }
+
+  function menuOutside(e) {
+    if (!activeMenu) return;
+    if (activeMenu.el.contains(e.target)) return;
+    if (activeMenu.anchorEl && activeMenu.anchorEl.contains(e.target)) return;
+    e.stopPropagation(); e.preventDefault();   // first outside click just dismisses
+    menuClose();
+  }
+
+  function menuClose() {
+    if (!activeMenu) return;
+    activeMenu.el.classList.add('hidden');
+    activeMenu = null;
+    document.removeEventListener('click', menuOutside, true);
+  }
+
+  function menuFocus(i) {
+    if (!activeMenu) return;
+    activeMenu.idx = Math.max(0, Math.min(activeMenu.items.length - 1, i));
+    var rows = activeMenu.listEl.children;
+    for (var k = 0; k < rows.length; k++) {
+      rows[k].className = rows[k].className.replace(/ focused/g, '') + (k === activeMenu.idx ? ' focused' : '');
+    }
+    var r = rows[activeMenu.idx];
+    if (r && r.scrollIntoView) { try { r.scrollIntoView(false); } catch (e) {} }
+  }
+
+  function menuMove(dir) { menuFocus(activeMenu.idx + dir); }
+
+  function menuSelect(i) {
+    if (!activeMenu) return;
+    var it = activeMenu.items[i];
+    menuClose();
+    if (it && it.onSelect) it.onSelect();
+  }
+
+  // ── Quality picker (Red / quality button) ───────────────────────────────────────
+  function openQualityMenu() {
+    if (activeMenu && activeMenu.kind === 'quality') { menuClose(); return; }   // toggle
+    var items = [], curRow = 0, n = 0;
+    for (var i = currentFormats.length - 1; i >= 0; i--) {        // highest first
+      if (!formatPlayable(currentFormats[i])) continue;
+      (function (idx, row) {
+        var f = currentFormats[idx];
+        var cur = (idx === currentQualityIdx);
+        if (cur) curRow = row;
+        var tag = f.height >= 2160 ? '4K' : (f.height >= 1440 ? 'QHD' : (f.height >= 1080 ? 'HD' : ''));
+        items.push({
+          current: cur,
+          html: '<span class="menu-row-lbl">' + f.label + '</span>' +
+                '<span class="menu-row-tag">' + tag + '</span>' +
+                '<span class="menu-row-check">' + (cur ? '✓' : '') + '</span>',
+          onSelect: function () {
+            if (idx === currentQualityIdx) { showControls(); return; }
+            showToast('Quality: ' + f.label);
+            loadQuality(idx, realTime());     // keep position across the switch
+            showControls();
+          }
+        });
+      })(i, n);
+      n++;
+    }
+    if (items.length < 2) { showToast('Only one quality available'); return; }
+    menuOpen({
+      kind: 'quality',
+      el: document.getElementById('quality-menu'),
+      listEl: document.getElementById('quality-menu-list'),
+      anchorEl: document.getElementById('ctrl-quality'),
+      items: items, idx: curRow
+    });
+  }
+
+  // ── Speed picker (Blue / speed button) ──────────────────────────────────────────
+  function openSpeedMenu() {
+    if (activeMenu && activeMenu.kind === 'speed') { menuClose(); return; }     // toggle
+    var items = [], curRow = 0, n = 0;
+    for (var i = SPEEDS.length - 1; i >= 0; i--) {               // fastest first
+      (function (idx, row) {
+        var cur = (idx === speedIdx);
+        if (cur) curRow = row;
+        var lbl = SPEEDS[idx] + '×' + (SPEEDS[idx] === 1 ? '  Normal' : '');
+        items.push({
+          current: cur,
+          html: '<span class="menu-row-lbl">' + lbl + '</span>' +
+                '<span class="menu-row-check">' + (cur ? '✓' : '') + '</span>',
+          onSelect: function () {
+            speedIdx = idx; applySpeed();
+            showToast('Speed ' + SPEEDS[idx] + '×');
+            showControls();
+          }
+        });
+      })(i, n);
+      n++;
+    }
+    menuOpen({
+      kind: 'speed',
+      el: document.getElementById('speed-menu'),
+      listEl: document.getElementById('speed-menu-list'),
+      anchorEl: document.getElementById('ctrl-speed'),
+      items: items, idx: curRow
+    });
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1315,6 +1456,15 @@
     }
 
     if (onPlayer) {
+      // A navigable menu (quality/speed) captures D-pad while open.
+      if (activeMenu) {
+        if (UP)         { menuMove(-1);              e.preventDefault(); return; }
+        if (DOWN)       { menuMove(1);               e.preventDefault(); return; }
+        if (OK)         { menuSelect(activeMenu.idx); e.preventDefault(); return; }
+        if (kc === 403 || kc === 406) { menuClose(); e.preventDefault(); return; }  // Red/Blue toggle off
+        return;
+      }
+
       // Error screen: OK retries, Red/Stop closes (Back handled by popstate)
       var errEl = document.getElementById('player-error');
       if (!errEl.classList.contains('hidden')) {
@@ -1329,7 +1479,7 @@
       if (UP)    { changeVolume(+0.1); e.preventDefault(); return; }
       if (DOWN)  { changeVolume(-0.1); e.preventDefault(); return; }
       if (OK)    { togglePlayPause();  e.preventDefault(); return; }
-      if (kc === 403)             { cycleQuality();     e.preventDefault(); return; }  // Red
+      if (kc === 403)             { openQualityMenu();  e.preventDefault(); return; }  // Red
       if (kc === 415)             { document.getElementById('player-video').play();  showControls(); e.preventDefault(); return; }
       if (kc === 19)              { document.getElementById('player-video').pause(); showControls(); e.preventDefault(); return; }
       if (kc === 413)             { closePlayer();      e.preventDefault(); return; }
@@ -1339,7 +1489,7 @@
       if (kc === 448)             { changeVolume(-0.1); e.preventDefault(); return; }
       if (kc === 404)             { playNext();         e.preventDefault(); return; }  // Green
       if (kc === 405)             { playPrev();         e.preventDefault(); return; }  // Yellow
-      if (kc === 406)             { cycleSpeed();       e.preventDefault(); return; }  // Blue
+      if (kc === 406)             { openSpeedMenu();    e.preventDefault(); return; }  // Blue
       if (kc === 449) {
         var mv = playerVolume > 0 ? -playerVolume : 1;
         changeVolume(mv); e.preventDefault(); return;

@@ -25,7 +25,12 @@ router = APIRouter(prefix="/youtube")
 # startup and the cache is hard-capped with oldest-first (LRU) eviction.
 CACHE_DIR = Path(tempfile.gettempdir()) / "ytv_cache"
 CACHE_DIR.mkdir(exist_ok=True)
-MUX_HEIGHTS = [720, 1080]              # heights we offer via server-side muxing
+MUX_HEIGHTS = [720, 1080]              # heights the /muxed (native) fallback serves
+# YouTube only offers H.264 (avc1) up to 1080p. 1440p/2160p exist only as VP9
+# (webm) or AV1 — AV1 can't decode on Chrome 38, so >1080p uses VP9. The client
+# gates each option on MediaSource.isTypeSupported() so VP9 only appears where the
+# TV can actually play it.
+AVC_MAX = 1080                         # highest avc1/H.264 height YouTube provides
 MAX_CACHE_BYTES = 2 * 1024 ** 3        # ~2 GB ceiling for muxed files (tune freely)
 _mux_locks: dict = {}                  # cache-name -> asyncio.Lock (avoid double work)
 
@@ -111,24 +116,47 @@ def _parse_entries(result: dict) -> list:
     return out
 
 
-def _quality_options(info: dict) -> list:
-    """Build the quality list the TV can actually play, sorted ascending so the
-    first entry is the instant-start default:
+def _video_by_height(formats: list, vcodec_prefix: str, ext: str) -> dict:
+    """Best video-only format per height for a given codec/container (highest tbr)."""
+    vids = {}
+    for f in formats:
+        if (f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")
+                and f.get("ext") == ext and str(f.get("vcodec", "")).startswith(vcodec_prefix)
+                and f.get("height") and f.get("url")):
+            h = f["height"]
+            if h not in vids or (f.get("tbr") or 0) > (vids[h].get("tbr") or 0):
+                vids[h] = f
+    return vids
 
-      • progressive  — muxed MP4 (audio+video in one file), plays instantly via
-        the /stream proxy. YouTube only offers this at 360p (itag 18) now.
-      • mux          — video-only DASH (720p/1080p) streamed via MSE on the
-        client (windowed /fmp4 segments — no disk). 'codecs' is the exact
-        MediaSource type string the client needs for addSourceBuffer().
+
+def _best_audio(formats: list, ext: str):
+    """Best audio-only format for a container (highest bitrate)."""
+    audio = None
+    for f in formats:
+        if (f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
+                and f.get("ext") == ext and f.get("url")):
+            if audio is None or (f.get("abr") or 0) > (audio.get("abr") or 0):
+                audio = f
+    return audio
+
+
+def _quality_options(info: dict) -> list:
+    """Build the full quality ladder, sorted ascending. Each entry carries the
+    exact MediaSource codec strings so the client can gate it on isTypeSupported()
+    (a TV without VP9 simply won't show 1440p/2160p):
+
+      • progressive — muxed MP4 (audio+video, one file), instant via /stream.
+        YouTube only offers this at 360p (itag 18) now.
+      • mux (mp4)   — avc1/H.264 video-only ≤1080p + AAC audio, fed to MSE.
+      • mux (webm)  — VP9 video-only 1440p/2160p + Opus audio, fed to MSE. The only
+        way past 1080p on this TV (no H.264 4K exists; AV1 can't decode here).
     """
     formats = info.get("formats") or []
 
     # Best progressive (muxed) MP4 — instant, no ffmpeg needed.
     prog = None
     for f in formats:
-        if not f.get("url"):
-            continue
-        if f.get("ext") != "mp4":
+        if not f.get("url") or f.get("ext") != "mp4":
             continue
         if f.get("acodec") in (None, "none") or f.get("vcodec") in (None, "none"):
             continue
@@ -137,34 +165,32 @@ def _quality_options(info: dict) -> list:
             prog = {"height": h, "label": f"{h}p", "mode": "progressive",
                     "stream_url": f["url"]}
 
-    # Best avc1 (H.264) video-only per height + best AAC audio — for MSE mux.
-    vids = {}
-    for f in formats:
-        if (f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")
-                and f.get("ext") == "mp4" and str(f.get("vcodec", "")).startswith("avc1")
-                and f.get("height")):
-            h = f["height"]
-            if h not in vids or (f.get("tbr") or 0) > (vids[h].get("tbr") or 0):
-                vids[h] = f
-    audio = None
-    for f in formats:
-        if (f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
-                and f.get("ext") == "m4a"):
-            if audio is None or (f.get("abr") or 0) > (audio.get("abr") or 0):
-                audio = f
-    acodec = (audio.get("acodec") if audio else None) or "mp4a.40.2"
+    avc  = _video_by_height(formats, "avc1", "mp4")    # H.264, ≤1080p
+    vp9  = _video_by_height(formats, "vp9",  "webm")   # VP9, up to 2160p
+    aac  = _best_audio(formats, "m4a")
+    opus = _best_audio(formats, "webm")
+    acodec = (aac.get("acodec") if aac else None) or "mp4a.40.2"
 
     out = []
     if prog:
         out.append(prog)
-    for h in MUX_HEIGHTS:
-        if h in vids and (not prog or h > prog["height"]):
-            vcodec = vids[h].get("vcodec") or "avc1.4d401f"
+
+    prog_h = prog["height"] if prog else 0
+    for h in sorted(set(list(avc.keys()) + list(vp9.keys()))):
+        if h < 480 or h <= prog_h:                     # skip tiny + what progressive covers
+            continue
+        if h <= AVC_MAX and h in avc:                  # H.264 path (known-good)
+            vcodec = avc[h].get("vcodec") or "avc1.4d401f"
             out.append({
-                "height": h,
-                "label":  f"{h}p",
-                "mode":   "mux",
-                "codecs": f'video/mp4; codecs="{vcodec}, {acodec}"',
+                "height": h, "label": f"{h}p", "mode": "mux", "container": "mp4",
+                "codecs":  f'video/mp4; codecs="{vcodec}"',
+                "acodecs": f'audio/mp4; codecs="{acodec}"',
+            })
+        elif h in vp9 and opus:                        # VP9 path (1440p/2160p)
+            out.append({
+                "height": h, "label": f"{h}p", "mode": "mux", "container": "webm",
+                "codecs":  'video/webm; codecs="vp9"',
+                "acodecs": 'audio/webm; codecs="opus"',
             })
 
     out.sort(key=lambda x: x["height"])
@@ -437,28 +463,17 @@ async def youtube_muxed(id: str, height: int = 1080):
 # via range requests (proxied through /stream). No ffmpeg, no disk, no seams.
 
 def _resolve_fmts(vid: str):
-    """Return ({height: video_format_dict}, audio_format_dict, duration) — avc1
-    video-only per height + best AAC audio-only (full dicts for codec strings)."""
+    """Return (avc_vids, vp9_vids, aac_audio, opus_audio, duration) — full format
+    dicts so /dash can pick the right codec family/container for the requested
+    height (avc1+AAC mp4 ≤1080p, VP9+Opus webm for 1440p/2160p)."""
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
     formats = info.get("formats") or []
-
-    audio = None
-    for f in formats:
-        if (f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
-                and f.get("ext") == "m4a" and f.get("url")):
-            if audio is None or (f.get("abr") or 0) > (audio.get("abr") or 0):
-                audio = f
-
-    vids = {}
-    for f in formats:
-        if (f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")
-                and f.get("ext") == "mp4" and str(f.get("vcodec", "")).startswith("avc1")
-                and f.get("height") and f.get("url")):
-            h = f["height"]
-            if h not in vids or (f.get("tbr") or 0) > (vids[h].get("tbr") or 0):
-                vids[h] = f
-    return vids, audio, (info.get("duration") or 0)
+    avc  = _video_by_height(formats, "avc1", "mp4")
+    vp9  = _video_by_height(formats, "vp9",  "webm")
+    aac  = _best_audio(formats, "m4a")
+    opus = _best_audio(formats, "webm")
+    return avc, vp9, aac, opus, (info.get("duration") or 0)
 
 
 def _iter_boxes(buf: bytes):
@@ -508,6 +523,109 @@ def _parse_dash_index(head: bytes) -> dict:
     return {"initEnd": init_end, "duration": round(t, 3), "segments": segs}
 
 
+def _ebml_vint(buf: bytes, i: int, keep_marker: bool):
+    """Read one EBML variable-length integer. keep_marker=True for element IDs
+    (which include the length-descriptor bits), False for sizes."""
+    first = buf[i]
+    mask = 0x80
+    length = 1
+    while length <= 8 and not (first & mask):
+        mask >>= 1
+        length += 1
+    if length > 8:
+        raise ValueError("bad ebml vint")
+    if keep_marker:
+        val = int.from_bytes(buf[i:i + length], "big")
+    else:
+        val = first & (mask - 1)
+        for j in range(1, length):
+            val = (val << 8) | buf[i + j]
+    return val, i + length
+
+
+def _ebml_elem(buf: bytes, i: int):
+    """Return (element_id, data_size, data_start_offset)."""
+    eid, i = _ebml_vint(buf, i, True)
+    size, i = _ebml_vint(buf, i, False)
+    return eid, size, i
+
+
+def _parse_webm_index(head: bytes, filesize: int = 0) -> dict:
+    """WebM/Matroska analogue of _parse_dash_index for VP9/Opus DASH streams.
+    Parses the Cues element (the segment index) into init range + segment table.
+    Every computed offset lands on a Cluster (0x1F43B675) — verified."""
+    n = len(head)
+
+    # Locate the Segment element; all Cue positions are relative to its data start.
+    i, seg_data, seg_size = 0, None, None
+    while i + 2 <= n:
+        eid, size, d = _ebml_elem(head, i)
+        if eid == 0x18538067:                          # Segment
+            seg_data, seg_size = d, size
+            break
+        i = d + size
+    if seg_data is None:
+        raise ValueError("no Segment element")
+
+    timescale = 1000000                                # TimestampScale, default 1ms (ns)
+    cues = []                                          # [(cue_time, cluster_pos), ...]
+    j = seg_data
+    while j + 2 <= n:
+        try:
+            eid, size, d = _ebml_elem(head, j)
+        except Exception:
+            break
+        if eid == 0x1549A966:                          # Info
+            k, kend = d, min(d + size, n)
+            while k + 2 <= kend:
+                cid, csize, cd = _ebml_elem(head, k)
+                if cid == 0x2AD7B1:                    # TimestampScale
+                    timescale = int.from_bytes(head[cd:cd + csize], "big")
+                k = cd + csize
+        elif eid == 0x1C53BB6B:                        # Cues (the index)
+            k, kend = d, min(d + size, n)
+            while k + 2 <= kend:
+                cpid, cpsize, cpd = _ebml_elem(head, k)
+                if cpid != 0xBB:                       # CuePoint
+                    k = cpd + cpsize
+                    continue
+                ct = cpos = None
+                m, mend = cpd, cpd + cpsize
+                while m + 2 <= mend:
+                    fid, fsize, fd = _ebml_elem(head, m)
+                    if fid == 0xB3:                    # CueTime
+                        ct = int.from_bytes(head[fd:fd + fsize], "big")
+                    elif fid == 0xB7:                  # CueTrackPositions
+                        p, pend = fd, fd + fsize
+                        while p + 2 <= pend:
+                            tid, tsize, td = _ebml_elem(head, p)
+                            if tid == 0xF1:            # CueClusterPosition
+                                cpos = int.from_bytes(head[td:td + tsize], "big")
+                            p = td + tsize
+                    m = fd + fsize
+                if ct is not None and cpos is not None:
+                    cues.append((ct, cpos))
+                k = cpd + cpsize
+            break
+        elif eid == 0x1F43B675:                        # Cluster → reached media, stop
+            break
+        j = d + size
+
+    if not cues:
+        raise ValueError("no Cues (need a larger head fetch)")
+
+    # Segment end: prefer the declared Segment size; fall back to file size.
+    seg_end = (seg_data + seg_size) if (seg_size and seg_size < (1 << 56)) else filesize
+    init_end = seg_data + cues[0][1]                   # init = [0, first Cluster)
+    segs = []
+    for idx in range(len(cues)):
+        ct, cpos = cues[idx]
+        off = seg_data + cpos
+        nxt = (seg_data + cues[idx + 1][1]) if idx + 1 < len(cues) else seg_end
+        segs.append([off, nxt - off, round(ct * timescale / 1e9, 3)])
+    return {"initEnd": init_end, "duration": segs[-1][2] if segs else 0, "segments": segs}
+
+
 async def _fetch_head(url: str, nbytes: int = 262144) -> bytes:
     headers = dict(STREAM_HEADERS)
     headers["Range"] = f"bytes=0-{nbytes - 1}"
@@ -526,22 +644,41 @@ async def youtube_dash(id: str, height: int = 1080):
         return JSONResponse({"error": "bad id"}, status_code=400)
 
     try:
-        vids, audio, duration = await asyncio.to_thread(_resolve_fmts, vid)
+        avc, vp9, aac, opus, duration = await asyncio.to_thread(_resolve_fmts, vid)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
-    if not vids or not audio:
-        return JSONResponse({"error": "no DASH streams for this video"}, status_code=404)
 
-    heights = sorted(vids.keys())
-    chosen = heights[0]
-    for h in heights:
-        if h <= height:
-            chosen = h
-    vfmt = vids[chosen]
+    def _pick(vids: dict):                              # nearest height ≤ requested
+        hs = sorted(vids.keys())
+        chosen = hs[0]
+        for h in hs:
+            if h <= height:
+                chosen = h
+        return vids[chosen]
+
+    # ≤1080p → avc1/AAC in mp4 (known-good). Above that → VP9/Opus in webm.
+    if height <= AVC_MAX and avc and aac:
+        vfmt, audio, container = _pick(avc), aac, "mp4"
+        vcodec = 'video/mp4; codecs="%s"' % (vfmt.get("vcodec") or "avc1.4d401f")
+        acodec = 'audio/mp4; codecs="%s"' % (aac.get("acodec") or "mp4a.40.2")
+    elif vp9 and opus:
+        vfmt, audio, container = _pick(vp9), opus, "webm"
+        vcodec = 'video/webm; codecs="vp9"'
+        acodec = 'audio/webm; codecs="opus"'
+    elif avc and aac:                                  # webm unavailable → best avc1
+        vfmt, audio, container = _pick(avc), aac, "mp4"
+        vcodec = 'video/mp4; codecs="%s"' % (vfmt.get("vcodec") or "avc1.4d401f")
+        acodec = 'audio/mp4; codecs="%s"' % (aac.get("acodec") or "mp4a.40.2")
+    else:
+        return JSONResponse({"error": "no DASH streams for this video"}, status_code=404)
 
     async def track(fmt):
         head = await _fetch_head(fmt["url"])
-        idx = await asyncio.to_thread(_parse_dash_index, head)
+        if container == "webm":
+            fsize = fmt.get("filesize") or fmt.get("filesize_approx") or 0
+            idx = await asyncio.to_thread(_parse_webm_index, head, fsize)
+        else:
+            idx = await asyncio.to_thread(_parse_dash_index, head)
         idx["stream"] = "/youtube/range?url=" + quote(fmt["url"], safe="")
         return idx
 
@@ -553,15 +690,15 @@ async def youtube_dash(id: str, height: int = 1080):
 
     return JSONResponse({
         "duration": duration or video_idx["duration"],
-        "height":   chosen,
+        "height":   vfmt.get("height") or height,
         "video": {
-            "codecs":   'video/mp4; codecs="%s"' % (vfmt.get("vcodec") or "avc1.4d401f"),
+            "codecs":   vcodec,
             "initEnd":  video_idx["initEnd"],
             "stream":   video_idx["stream"],
             "segments": video_idx["segments"],
         },
         "audio": {
-            "codecs":   'audio/mp4; codecs="%s"' % (audio.get("acodec") or "mp4a.40.2"),
+            "codecs":   acodec,
             "initEnd":  audio_idx["initEnd"],
             "stream":   audio_idx["stream"],
             "segments": audio_idx["segments"],
